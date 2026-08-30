@@ -3,11 +3,13 @@ import UIKit
 
 /// iOS entry point for the neo_wake plugin.
 ///
-/// Scaffold: binds the method + event channels and answers `platformVersion`.
-/// The ONNX session layer (U2), native codec + mel/embed/classify state
-/// machine (U3), neo_ble multi-listener attach (U5), and the engine-independent
-/// bootstrap (didFinishLaunching, before the restoration-aware central manager)
-/// that self-arms on a headless relaunch (U8) attach here.
+/// Scaffold: binds the method + event channels, answers `platformVersion`,
+/// and logs `arm`/`disarm` (U6's Dart-side facade calls these; this is a
+/// no-op stand-in, not the real record). The ONNX session layer (U2), native
+/// codec + mel/embed/classify state machine (U3), neo_ble multi-listener
+/// attach (U5), and the engine-independent bootstrap (didFinishLaunching,
+/// before the restoration-aware central manager) that self-arms on a
+/// headless relaunch (U8) attach here.
 ///
 /// NOTE: `register(with:)` does NOT run on a headless restoration relaunch, so
 /// the kill-surviving arm path must bootstrap from didFinishLaunching, not this
@@ -29,6 +31,15 @@ public class NeoWakePlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         switch call.method {
         case "platformVersion":
             result("iOS " + UIDevice.current.systemVersion)
+        // ponytail: log-only stand-in. The real persisted, kill-surviving arm
+        // record + attach is U8 — this just proves the channel round trips so
+        // the Dart facade can arm without throwing.
+        case "arm":
+            NSLog("NeoWakePlugin: arm (no-op scaffold): \(String(describing: call.arguments))")
+            result(nil)
+        case "disarm":
+            NSLog("NeoWakePlugin: disarm (no-op scaffold)")
+            result(nil)
         default:
             result(FlutterMethodNotImplemented)
         }
