@@ -237,6 +237,12 @@ public final class WakeCommandCapture {
     /// clip while capturing. This is the "hook the pipeline calls per frame"
     /// entry point; see this file's header doc for why it is unwired today.
     public func feed(_ payload: [UInt8], nowMs: Int64) {
+        // TODO(U8-harden): mid-command clip JOURNAL — `clip` below is
+        // RAM-only. A jetsam/kill between `openClip` and `closeClip` loses
+        // every frame captured so far; incrementally journaling `clip` to
+        // disk (mirroring `NeoAmbientSuppressionJournal`'s atomic-write
+        // pattern) and rehydrating it on the next attach() would let a
+        // mid-command kill still deliver a (partial) clip instead of none.
         if state == .capturing {
             clip.append(payload)
         } else {

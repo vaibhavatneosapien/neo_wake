@@ -192,6 +192,12 @@ class WakeCommandCapture(private var config: WakeCommandCaptureConfig = WakeComm
      * entry point; see this file's header doc for why it is unwired today.
      */
     fun feed(payload: ByteArray, nowMs: Long) {
+        // TODO(U8-harden): mid-command clip JOURNAL — `clip` below is
+        // RAM-only. A jetsam/kill between `openClip` and `closeClip` loses
+        // every frame captured so far; incrementally journaling `clip` to
+        // disk (mirroring `NeoAmbientSuppressionJournal`'s atomic-write
+        // pattern) and rehydrating it on the next attach() would let a
+        // mid-command kill still deliver a (partial) clip instead of none.
         if (state == WakeCaptureState.CAPTURING) {
             clip.add(payload)
         } else {

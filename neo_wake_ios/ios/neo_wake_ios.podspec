@@ -24,6 +24,17 @@ wake-word detection.
   s.resource_bundles = { 'neo_wake_ios' => ['Resources/**/*'] }
   s.dependency 'Flutter'
 
+  # Cross-plugin attach (U8, KTD9): neo_wake registers its "wake" listener
+  # directly on neo_ble's `BleEventSinks.shared` and hands finished command
+  # clips / ambient-suppression signals to `NeoAudioUploader.shared` — see
+  # NeoWakeAttach.swift. Direction is neo_wake -> neo_ble ONLY; neo_ble_ios
+  # must never depend back on this pod (kept acyclic). NOT verified by a real
+  # `pod install` in this bounded task (no device build here) — this is a
+  # parse-level podspec change; a real device/CI build is what confirms it
+  # links and resolves (neo_ble_ios is already an app-level sibling dependency
+  # today, so no version drift is introduced, just a new edge to it).
+  s.dependency 'neo_ble_ios'
+
   # onnxruntime-objc ships static-only, so the app ios/Podfile pre_install
   # must add neo_wake_ios to its static-linkage list under use_frameworks!
   # (plan KTD6 / U2). Pinned to 1.23.0: the last ORT release before the
