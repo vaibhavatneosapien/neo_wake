@@ -21,14 +21,22 @@ wake-word detection.
   s.resource_bundles = { 'neo_wake_ios' => ['Resources/**/*'] }
   s.dependency 'Flutter'
 
-  # ONNX Runtime lands in U2. onnxruntime-objc ships static-only, so the app
-  # ios/Podfile pre_install must add neo_wake to its static-linkage list under
-  # use_frameworks! (see plan KTD6 / U2):
-  #   s.dependency 'onnxruntime-objc', '1.23.0'
+  # onnxruntime-objc ships static-only, so the app ios/Podfile pre_install
+  # must add neo_wake_ios to its static-linkage list under use_frameworks!
+  # (plan KTD6 / U2). Pinned to 1.23.0: the last ORT release before the
+  # KleidiAI 1.24.x conv memory regression (microsoft/onnxruntime#29538) that
+  # flutter_onnxruntime's own podspec calls out — keep this pin in lockstep
+  # with flutter_onnxruntime's.
+  s.dependency 'onnxruntime-objc', '1.23.0'
 
   s.platform = :ios, '15.0'
 
-  # Flutter.framework does not contain an i386 slice.
-  s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES', 'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386' }
+  # Flutter.framework does not contain an i386 slice. Header search paths
+  # match flutter_onnxruntime's own podspec for a static onnxruntime-objc pod.
+  s.pod_target_xcconfig = {
+    'DEFINES_MODULE' => 'YES',
+    'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386',
+    'HEADER_SEARCH_PATHS' => '"${PODS_ROOT}/onnxruntime-objc/objectivec" "${PODS_ROOT}/onnxruntime-objc/objectivec/include"'
+  }
   s.swift_version = '5.0'
 end

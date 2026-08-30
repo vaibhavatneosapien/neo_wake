@@ -57,9 +57,14 @@ android {
     sourceSets {
         main.java.srcDirs += "src/main/kotlin"
         test.java.srcDirs += "src/test/kotlin"
+        androidTest.java.srcDirs += "src/androidTest/kotlin"
     }
     defaultConfig {
         minSdk = 31
+        // NeoWakeSessionsInstrumentedTest (U2) needs a device/emulator to run
+        // ORT's native .so — see that file's header for why it can't be a
+        // plain JVM unit test.
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
     testOptions {
         unitTests {
@@ -69,8 +74,13 @@ android {
 
     dependencies {
         implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
-        // ONNX Runtime (mel/embed/classify sessions) lands in U2:
-        //   implementation "com.microsoft.onnxruntime:onnxruntime-android:1.23.0"
+        // ONNX Runtime (mel/embed/classify sessions).
+        implementation "com.microsoft.onnxruntime:onnxruntime-android:1.23.0"
+
+        testImplementation "junit:junit:4.13.2"
+
+        androidTestImplementation "androidx.test.ext:junit:1.2.1"
+        androidTestImplementation "androidx.test:runner:1.6.2"
 
         // compileOnly: at runtime the embedding is supplied by the host app.
         // Present only so `gradlew -p neo_wake_android/android` compiles
