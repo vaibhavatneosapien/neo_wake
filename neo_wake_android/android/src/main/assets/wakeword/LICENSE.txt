@@ -1,6 +1,6 @@
 This directory ships two categories of ONNX model, under different licences.
 
-- neo_sim_sim_encore.onnx
+- neo_sim_sim_jig.onnx
   In-house, proprietary. All rights reserved.
 
 - melspectrogram_v1.onnx, embedding_model_v1.onnx

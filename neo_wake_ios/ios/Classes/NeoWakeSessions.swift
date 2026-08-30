@@ -31,7 +31,7 @@ final class NeoWakeSessions {
     enum Graph: String, CaseIterable {
         case melspectrogram = "melspectrogram_v1"
         case embedding = "embedding_model_v1"
-        case classifier = "neo_sim_sim_encore"
+        case classifier = "neo_sim_sim_jig"
     }
 
     enum NeoWakeSessionsError: Error {
