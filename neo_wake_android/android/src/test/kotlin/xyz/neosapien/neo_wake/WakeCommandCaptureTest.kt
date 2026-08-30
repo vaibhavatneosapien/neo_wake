@@ -156,4 +156,109 @@ class WakeCommandCaptureTest {
         assertEquals(frames.size, back.size)
         frames.indices.forEach { assertArrayEquals(frames[it], back[it]) }
     }
+
+    // ---- U9 / KTD11 ambient/command isolation seam -------------------------
+
+    @Test
+    fun onCaptureOpened_firesOnceOnTheWakeFireThatOpens_notOnTheCloseFire() {
+        val cap = WakeCommandCapture(WakeCommandCaptureConfig(minCommandMs = 10, frameMs = 10))
+        val opened = mutableListOf<String>()
+        cap.onCaptureOpened = { opened.add(it) }
+
+        cap.onFire(nowMs = 0L) // opens
+        assertEquals(1, opened.size)
+
+        for (i in 0 until 5) cap.feed(frame(i), nowMs = i * 10L)
+        cap.onFire(nowMs = 50L) // closes — must NOT fire onCaptureOpened again
+
+        assertEquals(1, opened.size)
+    }
+
+    @Test
+    fun onCaptureClosed_firesWithTheSameCaptureIdOnTheClosingFire() {
+        val cap = WakeCommandCapture(
+            WakeCommandCaptureConfig(tailTrimMs = 10, minCommandMs = 10, frameMs = 10),
+        )
+        val opened = mutableListOf<String>()
+        val closed = mutableListOf<String>()
+        cap.onCaptureOpened = { opened.add(it) }
+        cap.onCaptureClosed = { closed.add(it) }
+
+        cap.onFire(nowMs = 0L)
+        for (i in 0 until 5) cap.feed(frame(i), nowMs = i * 10L)
+        val clip = cap.onFire(nowMs = 50L)
+
+        assertNotNull(clip)
+        assertEquals(1, opened.size)
+        assertEquals(1, closed.size)
+        assertEquals("the ambient resume signal must correlate to the same capture", opened[0], closed[0])
+    }
+
+    @Test
+    fun onCaptureClosed_firesEvenWhenTheClipIsDiscardedAsTooShort() {
+        val cap = WakeCommandCapture(
+            WakeCommandCaptureConfig(tailTrimMs = 1500, minCommandMs = 200, frameMs = 10),
+        )
+        var closedCount = 0
+        var clipReadyCount = 0
+        cap.onCaptureClosed = { closedCount++ }
+        cap.onClipReady = { clipReadyCount++ }
+
+        cap.onFire(nowMs = 0L)
+        for (i in 0 until 10) cap.feed(frame(i), nowMs = i * 10L)
+        val clip = cap.onFire(nowMs = 100L) // discarded — tail trim eats it all
+
+        assertNull(clip)
+        assertEquals("the ambient feed must resume even though no clip was produced", 1, closedCount)
+        assertEquals(0, clipReadyCount)
+    }
+
+    @Test
+    fun onCaptureClosed_firesOnTheWallClockCeiling() {
+        val cap = WakeCommandCapture(WakeCommandCaptureConfig(maxClipMs = 1000, minCommandMs = 10, frameMs = 10))
+        var closedId: String? = null
+        var openedId: String? = null
+        cap.onCaptureOpened = { openedId = it }
+        cap.onCaptureClosed = { closedId = it }
+
+        cap.onFire(nowMs = 0L)
+        for (i in 0 until 50) cap.feed(frame(i), nowMs = i * 10L)
+        assertNull(cap.tick(nowMs = 500L))
+        assertNull("no premature resume before the ceiling", closedId)
+
+        cap.tick(nowMs = 1000L)
+        assertEquals(openedId, closedId)
+    }
+
+    @Test
+    fun onCaptureClosed_firesOnDisconnectMidCapture_butNotWhenIdle() {
+        val cap = WakeCommandCapture(WakeCommandCaptureConfig(minCommandMs = 10, frameMs = 10))
+        var closedCount = 0
+        cap.onCaptureClosed = { closedCount++ }
+
+        // Idle disconnect — nothing was open, no resume signal to send.
+        cap.onDisconnect(nowMs = 0L)
+        assertEquals(0, closedCount)
+
+        cap.onFire(nowMs = 100L)
+        for (i in 0 until 5) cap.feed(frame(i), nowMs = 100L + i * 10L)
+        cap.onDisconnect(nowMs = 200L)
+        assertEquals(1, closedCount)
+    }
+
+    @Test
+    fun captureHooks_defaultToNull_dormantByDesign() {
+        val cap = WakeCommandCapture(
+            WakeCommandCaptureConfig(tailTrimMs = 10, minCommandMs = 10, frameMs = 10),
+        )
+        assertNull(cap.onCaptureOpened)
+        assertNull(cap.onCaptureClosed)
+
+        // Must not throw with both hooks unset (the live U8 binding is
+        // optional until wired).
+        cap.onFire(nowMs = 0L)
+        for (i in 0 until 5) cap.feed(frame(i), nowMs = i * 10L)
+        val clip = cap.onFire(nowMs = 50L)
+        assertNotNull(clip)
+    }
 }

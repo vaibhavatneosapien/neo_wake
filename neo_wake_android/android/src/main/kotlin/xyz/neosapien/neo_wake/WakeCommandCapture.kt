@@ -16,6 +16,13 @@ import java.nio.ByteOrder
 // neo_ble_android module dependency: neo_wake does not depend on neo_ble
 // today (U5 only modified neo_ble's own fan-out registry), and this bounded
 // task cannot Gradle-build a new cross-module dependency to verify it.
+//
+// U9 / KTD11 adds two more deferred-binding hooks on the SAME seam:
+// `onCaptureOpened`/`onCaptureClosed`, fired on the capture's open/close
+// (not the clip's — see their own docs). The live binding (U8) is
+// `NeoAudioUploader.setAmbientSuppressed(true, id)` on open and
+// `resumeAmbient()` on close — isolating command audio from neo_ble's
+// ambient notes feed for the duration of one capture.
 
 /** One assembled command clip, ready for the cross-plugin hand-off. */
 data class WakeCommandClip(
@@ -135,6 +142,8 @@ class WakeCommandCapture(private var config: WakeCommandCaptureConfig = WakeComm
     private var clipPrerollFrames = 0
     private var clipOpenedAtMs: Long = 0
     private var clipCounter = 0
+    private var captureCounter = 0
+    private var currentCaptureId: String? = null
 
     /**
      * Delivered once per closed, non-discarded clip. Set by the
@@ -142,6 +151,34 @@ class WakeCommandCapture(private var config: WakeCommandCaptureConfig = WakeComm
      * legitimate, expected state until U8 wires it.
      */
     var onClipReady: ((WakeCommandClip) -> Unit)? = null
+
+    // ---- Ambient/command isolation seam (U9 / KTD11) ----------------------
+    //
+    // Deferred-binding hooks, same pattern as [onClipReady] — the LIVE
+    // binding to neo_ble's `NeoAudioUploader.setAmbientSuppressed`/
+    // `resumeAmbient` happens in U8. These fire on the CAPTURE lifecycle
+    // (open/close), not the CLIP lifecycle: unlike [onClipReady] (which only
+    // fires for a usable, non-discarded clip), [onCaptureClosed] fires on
+    // EVERY close — including a too-short capture that gets discarded —
+    // because the ambient feed must resume the instant the command WINDOW
+    // ends, whether or not that window produced an uploadable clip.
+
+    /**
+     * Fired the instant a capture OPENS (a wake-fire while idle) — the
+     * moment the ambient feed must start gating, with [captureId] as the
+     * correlation id journaled alongside the suppression (see
+     * `NeoAmbientSuppression` in neo_ble). Never fired for the SECOND fire
+     * of a toggle (that's a close, not an open).
+     */
+    var onCaptureOpened: ((captureId: String) -> Unit)? = null
+
+    /**
+     * Fired the instant a capture CLOSES — via the toggling second fire,
+     * the wall-clock ceiling ([tick]), or [onDisconnect] — regardless of
+     * whether it produced a usable [WakeCommandClip]. This is the ambient
+     * feed's resume signal; it must not wait on a clip actually existing.
+     */
+    var onCaptureClosed: ((captureId: String) -> Unit)? = null
 
     /** Re-applies a new lag (Remote Config equivalent) without a relaunch. */
     fun reconfigure(newConfig: WakeCommandCaptureConfig) {
@@ -204,9 +241,14 @@ class WakeCommandCapture(private var config: WakeCommandCaptureConfig = WakeComm
         clipPrerollFrames = minOf(prerollFramesAtArrival, pre.size)
         clipOpenedAtMs = nowMs
         state = WakeCaptureState.CAPTURING
+        val captureId = "cap-$nowMs-$captureCounter"
+        captureCounter += 1
+        currentCaptureId = captureId
+        onCaptureOpened?.invoke(captureId)
     }
 
     private fun closeClip(nowMs: Long, reason: String, trimTail: Boolean): WakeCommandClip? {
+        val captureId = currentCaptureId ?: "cap-$nowMs-unknown"
         var frames: List<ByteArray> = clip
         if (trimTail) {
             val trim = minOf(config.framesFor(config.tailTrimMs), frames.size)
@@ -223,6 +265,10 @@ class WakeCommandCapture(private var config: WakeCommandCaptureConfig = WakeComm
         val commandFrames = frames.size - prerollFrames
 
         resetCapture()
+        // Fires on EVERY close, including a too-short/discarded capture
+        // below — the ambient feed must resume the instant the command
+        // WINDOW ends, not only when it produced an uploadable clip.
+        onCaptureClosed?.invoke(captureId)
 
         if (!isLongEnoughToBeACommand(commandFrames, config.framesFor(config.minCommandMs))) {
             return null
@@ -251,6 +297,7 @@ class WakeCommandCapture(private var config: WakeCommandCaptureConfig = WakeComm
         clip = mutableListOf()
         clipPrerollFrames = 0
         clipOpenedAtMs = 0
+        currentCaptureId = null
         ring.clear()
         state = WakeCaptureState.IDLE
     }

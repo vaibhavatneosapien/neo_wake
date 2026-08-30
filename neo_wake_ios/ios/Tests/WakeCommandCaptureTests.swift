@@ -131,4 +131,101 @@ final class WakeCommandCaptureTests: XCTestCase {
         let back = unflatten(flat)
         XCTAssertEqual(frames, back)
     }
+
+    // MARK: - U9 / KTD11 ambient/command isolation seam
+
+    func testOnCaptureOpenedFiresOnceOnTheWakeFireThatOpensNotOnTheCloseFire() {
+        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(minCommandMs: 10, frameMs: 10))
+        var opened: [String] = []
+        cap.onCaptureOpened = { opened.append($0) }
+
+        cap.onFire(nowMs: 0) // opens
+        XCTAssertEqual(opened.count, 1)
+
+        for i in 0..<5 { cap.feed(frame(i), nowMs: Int64(i * 10)) }
+        cap.onFire(nowMs: 50) // closes — must NOT fire onCaptureOpened again
+
+        XCTAssertEqual(opened.count, 1)
+    }
+
+    func testOnCaptureClosedFiresWithTheSameCaptureIdOnTheClosingFire() {
+        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(tailTrimMs: 10, minCommandMs: 10, frameMs: 10))
+        var opened: [String] = []
+        var closed: [String] = []
+        cap.onCaptureOpened = { opened.append($0) }
+        cap.onCaptureClosed = { closed.append($0) }
+
+        cap.onFire(nowMs: 0)
+        for i in 0..<5 { cap.feed(frame(i), nowMs: Int64(i * 10)) }
+        let clip = cap.onFire(nowMs: 50)
+
+        XCTAssertNotNil(clip)
+        XCTAssertEqual(opened.count, 1)
+        XCTAssertEqual(closed.count, 1)
+        XCTAssertEqual(opened.first, closed.first, "the ambient resume signal must correlate to the same capture")
+    }
+
+    func testOnCaptureClosedFiresEvenWhenTheClipIsDiscardedAsTooShort() {
+        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(
+            prerollWindowMs: 1000, lagMs: 0, tailTrimMs: 1500, maxClipMs: 60_000, minCommandMs: 200, frameMs: 10
+        ))
+        var closedCount = 0
+        var clipReadyCount = 0
+        cap.onCaptureClosed = { _ in closedCount += 1 }
+        cap.onClipReady = { _ in clipReadyCount += 1 }
+
+        cap.onFire(nowMs: 0)
+        for i in 0..<10 { cap.feed(frame(i), nowMs: Int64(i * 10)) } // 100ms
+        let clip = cap.onFire(nowMs: 100) // discarded — tail trim eats it all
+
+        XCTAssertNil(clip)
+        XCTAssertEqual(closedCount, 1, "the ambient feed must resume even though no clip was produced")
+        XCTAssertEqual(clipReadyCount, 0)
+    }
+
+    func testOnCaptureClosedFiresOnTheWallClockCeiling() {
+        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(
+            prerollWindowMs: 1000, lagMs: 0, tailTrimMs: 1500, maxClipMs: 1000, minCommandMs: 10, frameMs: 10
+        ))
+        var openedId: String?
+        var closedId: String?
+        cap.onCaptureOpened = { openedId = $0 }
+        cap.onCaptureClosed = { closedId = $0 }
+
+        cap.onFire(nowMs: 0)
+        for i in 0..<50 { cap.feed(frame(i), nowMs: Int64(i * 10)) }
+        XCTAssertNil(cap.tick(nowMs: 500))
+        XCTAssertNil(closedId, "no premature resume before the ceiling")
+
+        cap.tick(nowMs: 1000)
+        XCTAssertEqual(openedId, closedId)
+    }
+
+    func testOnCaptureClosedFiresOnDisconnectMidCaptureButNotWhenIdle() {
+        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(minCommandMs: 10, frameMs: 10))
+        var closedCount = 0
+        cap.onCaptureClosed = { _ in closedCount += 1 }
+
+        // Idle disconnect — nothing was open, no resume signal to send.
+        cap.onDisconnect(nowMs: 0)
+        XCTAssertEqual(closedCount, 0)
+
+        cap.onFire(nowMs: 100)
+        for i in 0..<5 { cap.feed(frame(i), nowMs: Int64(100 + i * 10)) }
+        cap.onDisconnect(nowMs: 200)
+        XCTAssertEqual(closedCount, 1)
+    }
+
+    func testCaptureHooksDefaultToNilDormantByDesign() {
+        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(tailTrimMs: 10, minCommandMs: 10, frameMs: 10))
+        XCTAssertNil(cap.onCaptureOpened)
+        XCTAssertNil(cap.onCaptureClosed)
+
+        // Must not crash with both hooks unset (the live U8 binding is
+        // optional until wired).
+        cap.onFire(nowMs: 0)
+        for i in 0..<5 { cap.feed(frame(i), nowMs: Int64(i * 10)) }
+        let clip = cap.onFire(nowMs: 50)
+        XCTAssertNotNil(clip)
+    }
 }
