@@ -1,0 +1,9 @@
+This directory ships two categories of ONNX model, under different licences.
+
+- neo_sim_sim_v2.onnx
+  In-house, proprietary. All rights reserved.
+
+- melspectrogram_v1.onnx, embedding_model_v1.onnx
+  Shared feature frontend from openWakeWord v0.5.1
+  (https://github.com/dscripka/openWakeWord), licensed Apache License 2.0
+  (https://github.com/dscripka/openWakeWord/blob/main/LICENSE).

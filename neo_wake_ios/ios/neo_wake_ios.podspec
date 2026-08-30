@@ -15,6 +15,10 @@ wake-word detection.
   s.author           = { 'Neo Sapien' => 'engineering@neosapien.xyz' }
   s.source           = { :path => '.' }
   s.source_files     = 'Classes/**/*'
+  # The three ONNX models ship as a resource bundle. At runtime U2 copies the
+  # bundled model to a temp path for createSession (KTD7). Lookup key
+  # 'neo_wake_ios' -> neo_wake_ios.bundle in the host app.
+  s.resource_bundles = { 'neo_wake_ios' => ['Resources/**/*'] }
   s.dependency 'Flutter'
 
   # ONNX Runtime lands in U2. onnxruntime-objc ships static-only, so the app

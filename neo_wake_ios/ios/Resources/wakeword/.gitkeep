@@ -1,2 +1,0 @@
-Bundle the three ONNX models here in U1 (mel / embed / classify).
-Source: feat/onnx-wake-word-engine branch fixtures.
