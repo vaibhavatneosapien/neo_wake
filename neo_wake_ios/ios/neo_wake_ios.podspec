@@ -15,6 +15,9 @@ wake-word detection.
   s.author           = { 'Neo Sapien' => 'engineering@neosapien.xyz' }
   s.source           = { :path => '.' }
   s.source_files     = 'Classes/**/*'
+  # Vendored libopus (KTD3) ships its own docs/licence text alongside the C
+  # source under the same Classes/** glob — not compilable input.
+  s.exclude_files    = 'Classes/ThirdParty/opus/VENDORING.md', 'Classes/ThirdParty/opus/COPYING'
   # The three ONNX models ship as a resource bundle. At runtime U2 copies the
   # bundled model to a temp path for createSession (KTD7). Lookup key
   # 'neo_wake_ios' -> neo_wake_ios.bundle in the host app.
@@ -32,11 +35,27 @@ wake-word detection.
   s.platform = :ios, '15.0'
 
   # Flutter.framework does not contain an i386 slice. Header search paths
-  # match flutter_onnxruntime's own podspec for a static onnxruntime-objc pod.
+  # match flutter_onnxruntime's own podspec for a static onnxruntime-objc pod,
+  # plus the vendored libopus (KTD3, ios/Classes/ThirdParty/opus/VENDORING.md)
+  # — 'config.h' at the vendor root, 'include/' for opus.h/opus_types.h, and
+  # 'celt'/'silk'/'silk/float' because those .c files #include local headers
+  # from their own directory (mirrors the -I flags this exact file set was
+  # verified against; see VENDORING.md's "Verification performed" section).
+  # ORT ships no iOS-simulator slice (see NeoWakeSessionsTests.swift's own
+  # note) and neither does a from-source libopus target here — this whole
+  # plugin is device-only, matching flutter_opus's existing constraint.
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386',
-    'HEADER_SEARCH_PATHS' => '"${PODS_ROOT}/onnxruntime-objc/objectivec" "${PODS_ROOT}/onnxruntime-objc/objectivec/include"'
+    'HEADER_SEARCH_PATHS' => '"${PODS_ROOT}/onnxruntime-objc/objectivec" "${PODS_ROOT}/onnxruntime-objc/objectivec/include" ' \
+      '"${PODS_TARGET_SRCROOT}/Classes/ThirdParty/opus" "${PODS_TARGET_SRCROOT}/Classes/ThirdParty/opus/include" ' \
+      '"${PODS_TARGET_SRCROOT}/Classes/ThirdParty/opus/celt" "${PODS_TARGET_SRCROOT}/Classes/ThirdParty/opus/silk" ' \
+      '"${PODS_TARGET_SRCROOT}/Classes/ThirdParty/opus/silk/float"',
+    # -DHAVE_CONFIG_H=1 selects the vendored config.h (not opus's own
+    # autotools output, which nothing here runs) — see VENDORING.md. -w
+    # silences upstream's own warnings (not this plugin's code); harmless on
+    # the Swift files in the same target, which ignore C flags.
+    'OTHER_CFLAGS' => '-DHAVE_CONFIG_H=1 -DOPUS_BUILD=1 -w'
   }
   s.swift_version = '5.0'
 end

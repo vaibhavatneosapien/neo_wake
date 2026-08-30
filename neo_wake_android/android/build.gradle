@@ -46,6 +46,11 @@ apply plugin: "kotlin-android"
 android {
     namespace = "xyz.neosapien.neo_wake"
     compileSdk = 36
+    // Pinned for the KTD3 CMake/JNI build (libopus) — reproducible across
+    // machines instead of whatever NDK a local SDK manager happens to
+    // side-load first (this environment had a broken/incomplete 25.1.x
+    // alongside a working one; pinning avoids that class of failure).
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_1_8
@@ -65,6 +70,25 @@ android {
         // ORT's native .so — see that file's header for why it can't be a
         // plain JVM unit test.
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+
+        // KTD3: the vendored libopus + JNI bridge (cpp/CMakeLists.txt, see
+        // cpp/third_party/opus/VENDORING.md). Verified in this environment
+        // via a direct NDK `cmake --toolchain android.toolchain.cmake`
+        // cross-compile to arm64-v8a (not through this Gradle block itself —
+        // see the U3 task report) — this AGP-level wiring is otherwise
+        // untested (no gradlew in this checkout to drive a full build).
+        externalNativeBuild {
+            cmake {
+                cppFlags ""
+                abiFilters "arm64-v8a", "armeabi-v7a", "x86_64"
+            }
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
     }
     testOptions {
         unitTests {
