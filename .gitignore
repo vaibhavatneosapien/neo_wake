@@ -1,0 +1,12 @@
+build/
+.gradle/
+local.properties
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+*.iml
+.idea/
+Pods/
+.symlinks/
+Flutter.podspec

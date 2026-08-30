@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Scaffold: no permissions/components yet. The engine-independent
+         native bootstrap (a ContentProvider startup hook, KTD9) and any
+         mic/FGS wiring land in U8. -->
+</manifest>

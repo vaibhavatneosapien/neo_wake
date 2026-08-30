@@ -1,0 +1,22 @@
+name: neo_wake_ios
+description: iOS implementation of the neo_wake plugin.
+version: 0.0.1
+publish_to: none
+
+environment:
+  sdk: ^3.5.4
+  flutter: ">=3.3.0"
+
+flutter:
+  plugin:
+    implements: neo_wake
+    platforms:
+      ios:
+        pluginClass: NeoWakePlugin
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_lints: ^5.0.0

@@ -1,0 +1,29 @@
+name: neo_wake
+description: Native ONNX wake-word ("Neo") detection as a federated Flutter plugin (facade package).
+version: 0.0.1
+publish_to: none
+
+environment:
+  sdk: ^3.5.4
+  flutter: ">=3.3.0"
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        default_package: neo_wake_android
+      ios:
+        default_package: neo_wake_ios
+
+dependencies:
+  flutter:
+    sdk: flutter
+  neo_wake_android:
+    path: ../neo_wake_android
+  neo_wake_ios:
+    path: ../neo_wake_ios
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0

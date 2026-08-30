@@ -1,0 +1,82 @@
+group = "xyz.neosapien.neo_wake"
+version = "1.0"
+
+buildscript {
+    ext.kotlin_version = "1.9.24"
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath "com.android.tools.build:gradle:8.3.0"
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    }
+}
+
+// True only for `gradlew -p neo_wake_android/android ...`. Inside a host app
+// build the module is the subproject :neo_wake_android and the app's Flutter
+// Gradle plugin owns the embedding.
+def isStandalone = project == project.rootProject
+
+rootProject.allprojects {
+    repositories {
+        google()
+        mavenCentral()
+        if (isStandalone) {
+            maven { url = "https://storage.googleapis.com/download.flutter.io" }
+        }
+    }
+}
+
+// Engine revision read from the local Flutter SDK so it tracks .fvmrc.
+// Standalone only — a Shorebird release builds against its own engine fork.
+ext.flutterEngineVersion = !isStandalone ? null : {
+    def root = System.getenv("FLUTTER_ROOT")
+    if (root == null) {
+        def which = ["/bin/sh", "-c", "command -v flutter"].execute().text.trim()
+        if (which) root = new File(which).canonicalFile.parentFile.parentFile.path
+    }
+    def f = root ? new File(root, "bin/internal/engine.version") : null
+    return (f != null && f.exists()) ? f.text.trim() : null
+}()
+
+apply plugin: "com.android.library"
+apply plugin: "kotlin-android"
+
+android {
+    namespace = "xyz.neosapien.neo_wake"
+    compileSdk = 36
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
+    kotlinOptions {
+        jvmTarget = JavaVersion.VERSION_1_8.toString()
+    }
+    sourceSets {
+        main.java.srcDirs += "src/main/kotlin"
+        test.java.srcDirs += "src/test/kotlin"
+    }
+    defaultConfig {
+        minSdk = 31
+    }
+    testOptions {
+        unitTests {
+            returnDefaultValues = true
+        }
+    }
+
+    dependencies {
+        implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
+        // ONNX Runtime (mel/embed/classify sessions) lands in U2:
+        //   implementation "com.microsoft.onnxruntime:onnxruntime-android:1.23.0"
+
+        // compileOnly: at runtime the embedding is supplied by the host app.
+        // Present only so `gradlew -p neo_wake_android/android` compiles
+        // standalone. Skipped if no Flutter SDK is discoverable.
+        if (project.ext.flutterEngineVersion) {
+            compileOnly "io.flutter:flutter_embedding_debug:1.0.0-${project.ext.flutterEngineVersion}"
+        }
+    }
+}
