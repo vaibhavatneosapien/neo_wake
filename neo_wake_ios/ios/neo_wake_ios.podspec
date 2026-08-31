@@ -15,6 +15,15 @@ wake-word detection.
   s.author           = { 'Neo Sapien' => 'engineering@neosapien.xyz' }
   s.source           = { :path => '.' }
   s.source_files     = 'Classes/**/*'
+  # Only the C bridge header is public (Swift imports it through the module
+  # umbrella). Everything else — crucially the vendored libopus headers — is
+  # PRIVATE, so the generated `neo_wake_ios-umbrella.h` does NOT #import opus's
+  # internal headers. Without this, the umbrella pulls in both fixed-point
+  # variants (DIV32 macro redefined) and the ARM-NE10 optimized modes header
+  # (NE10_types.h not found — NE10 isn't vendored), breaking the module build.
+  # The opus .c still compiles fine via HEADER_SEARCH_PATHS below; those headers
+  # simply don't need to be in the module's public surface.
+  s.public_header_files = 'Classes/opus_bridge.h'
   # Vendored libopus (KTD3) ships its own docs/licence text alongside the C
   # source under the same Classes/** glob — not compilable input.
   s.exclude_files    = 'Classes/ThirdParty/opus/VENDORING.md', 'Classes/ThirdParty/opus/COPYING'

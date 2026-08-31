@@ -18,12 +18,12 @@ import onnxruntime_objc
 /// NeoWakeSessionsTests.swift (U2) for the ORT input/output tensor names
 /// this mirrors exactly (`"input"`/`"output"` for mel, `"input_1"`/
 /// `"conv2d_19"` for embed, `"onnx::Flatten_0"`/`"output"` for classify).
-public enum NeoWakeOrtHooksError: Error {
+enum NeoWakeOrtHooksError: Error {
     case sessionNotLoaded(NeoWakeSessions.Graph)
     case unexpectedOutputShape([NSNumber])
 }
 
-public enum NeoWakeOrtHooks {
+enum NeoWakeOrtHooks {
     /// Builds a `MelHook` over the `melspectrogram` session. Input tensor
     /// `"input"`, shape `[1, 1760]` (batch, samples — see
     /// `NeoWakeSessionsTests.testMelspectrogramSession_dummyInput_returnsExpectedOutputRank`).
