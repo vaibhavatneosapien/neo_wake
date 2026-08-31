@@ -120,13 +120,36 @@ public final class WakeCodecPipeline {
         spotter.onFrameDropped()
     }
 
+    // Post-fire cooldown (mirrors the Dart service's _kLockoutMs). Without it
+    // the embedding ring keeps scoring the same "Neo SimSim" every 80 ms step
+    // for ~1.3 s, so one spoken wake word fires dozens of times. On a real fire
+    // we clear the ring (onDetection) AND suppress further fires for the lockout
+    // window, so a single utterance = a single fire and the open/close toggle
+    // stays sane.
+    private var lockoutUntilMs: Double = 0
+    private static let lockoutMs: Double = 1500
+
     private func feedEngine(_ samples: [Int16]) throws -> [WakeSpotterStep] {
         var results: [WakeSpotterStep] = []
         var thrown: Error?
         framer.add(samples) { frame in
             guard thrown == nil else { return }
             do {
-                results.append(try spotter.process(frame))
+                let step = try spotter.process(frame)
+                if step.fired {
+                    let now = Date().timeIntervalSince1970 * 1000
+                    if now < lockoutUntilMs {
+                        // Within the cooldown — a re-fire on the still-decaying
+                        // ring. Surface the step but not as a fire.
+                        results.append(WakeSpotterStep(stepIndex: step.stepIndex, score: step.score, fired: false))
+                    } else {
+                        results.append(step)
+                        spotter.onDetection() // clear the ring so the same word can't re-fire
+                        lockoutUntilMs = now + WakeCodecPipeline.lockoutMs
+                    }
+                } else {
+                    results.append(step)
+                }
             } catch {
                 thrown = error
             }
