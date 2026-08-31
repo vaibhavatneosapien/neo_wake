@@ -24,7 +24,7 @@ object NeoWakeSessions {
         MELSPECTROGRAM("melspectrogram_v1"),
         EMBEDDING("embedding_model_v1"),
         // KTD7: keep the version-templated classifier name.
-        CLASSIFIER("neo_sim_sim_jig"),
+        CLASSIFIER("neo_sim_sim_cover"),
     }
 
     private val lock = Any()
