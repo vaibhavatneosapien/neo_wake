@@ -81,6 +81,24 @@ public final class NeoWakeFrameWorker {
         }
     }
 
+    /// Run an O(1) task on the worker's serial queue — same serialization as
+    /// submitted frames, so callers (the ceiling timer) can mutate capture
+    /// state race-free. No-op after shutdown, mirroring submitFrame.
+    public func submitTask(_ work: @escaping () -> Void) {
+        statsLock.lock()
+        let shutdown = isShutdown
+        statsLock.unlock()
+        guard !shutdown else { return }
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.statsLock.lock()
+            let shutdown = self.isShutdown
+            self.statsLock.unlock()
+            guard !shutdown else { return }
+            work()
+        }
+    }
+
     /// Stops accepting new frames AND drops pending queued work (Fix 8,
     /// mirrors Android `NeoWakeFrameWorker.kt`'s `shutdownNow()`): anything
     /// already dequeued and running when this is called still finishes —

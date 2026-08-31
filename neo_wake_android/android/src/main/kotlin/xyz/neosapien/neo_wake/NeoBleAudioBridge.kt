@@ -131,11 +131,82 @@ internal object NeoBleAudioBridge {
         }
     }
 
+    /** [xyz.neosapien.neo_ble.ble.NeoBleService.Companion.setCommandMode] —
+     * lights (`true`) or clears (`false`) both earbud command-mode LEDs.
+     * Fire-and-forget: neo_ble's own companion wrapper already dispatches
+     * onto its service executor and no-ops when not connected, so this is
+     * just the reflective hop across the plugin boundary — failures are
+     * swallowed (best-effort, must never affect the capture pipeline). */
+    fun setCommandMode(enabled: Boolean) {
+        try {
+            val cls = Class.forName(BLE_SERVICE_CLASS)
+            val companion = cls.getField("Companion").get(null)
+            val method = companion.javaClass.getMethod("setCommandMode", Boolean::class.javaPrimitiveType)
+            method.invoke(companion, enabled)
+        } catch (t: Throwable) {
+            warn("setCommandMode", unwrap(t))
+        }
+    }
+
+    /** [BleEventSinks.registerCommandModeStateProvider] /
+     * [BleEventSinks.clearCommandModeStateProvider] — registers (or clears,
+     * on `null`) neo_wake's own command-capture truth as neo_ble's
+     * connect-ready LED reconcile source (command-mode UI parity plan, U3).
+     * Best-effort like every other bridge call: a failure just means the
+     * reconcile falls back to its own `false` default (never self-heals ON,
+     * but never wrongly claims ON either). */
+    fun setCommandModeStateProvider(provider: (() -> Boolean)?) {
+        try {
+            val cls = Class.forName(EVENT_SINKS_CLASS)
+            val instance = cls.getField("INSTANCE").get(null)
+            if (provider == null) {
+                val method = cls.getMethod("clearCommandModeStateProvider")
+                method.invoke(instance)
+            } else {
+                val method = cls.getMethod("registerCommandModeStateProvider", Function0::class.java)
+                method.invoke(instance, provider)
+            }
+        } catch (t: Throwable) {
+            warn("setCommandModeStateProvider", unwrap(t))
+        }
+    }
+
+    /** [BleEventSinks.registerMicStoppedHandler] /
+     * [BleEventSinks.clearMicStoppedHandler] — registers (or clears, on
+     * `null`) neo_wake's own force-close-on-mic-stop handler (command-mode
+     * force-off plan). neo_ble invokes this when the pendant's mic stops
+     * while the connection stays live (sleep or double-tap stop). Best-effort
+     * like every other bridge call: a failure just means a stuck CAPTURING
+     * command mode is left to its existing closers (wake re-fire / 60s
+     * ceiling / full disconnect). */
+    fun setMicStoppedHandler(handler: (() -> Unit)?) {
+        try {
+            val cls = Class.forName(EVENT_SINKS_CLASS)
+            val instance = cls.getField("INSTANCE").get(null)
+            if (handler == null) {
+                val method = cls.getMethod("clearMicStoppedHandler")
+                method.invoke(instance)
+            } else {
+                val method = cls.getMethod("registerMicStoppedHandler", Function0::class.java)
+                method.invoke(instance, handler)
+            }
+        } catch (t: Throwable) {
+            warn("setMicStoppedHandler", unwrap(t))
+        }
+    }
+
     private fun uploaderInstance(context: Context): Any? {
         return try {
+            // `NeoAudioUploader.get(Context)` is a Kotlin `companion object`
+            // method with no @JvmStatic, so it lives on NeoAudioUploader$Companion
+            // — NOT on NeoAudioUploader itself. Resolve it off the Companion, the
+            // same pattern cachedCodec() above already uses. (A plain
+            // cls.getMethod("get", …) throws NoSuchMethodException — the bug that
+            // silently killed every command upload.)
             val cls = Class.forName(UPLOADER_CLASS)
-            val getMethod = cls.getMethod("get", Context::class.java)
-            getMethod.invoke(null, context.applicationContext)
+            val companion = cls.getField("Companion").get(null)
+            val getMethod = companion.javaClass.getMethod("get", Context::class.java)
+            getMethod.invoke(companion, context.applicationContext)
         } catch (t: Throwable) {
             warn("NeoAudioUploader.get", unwrap(t))
             null

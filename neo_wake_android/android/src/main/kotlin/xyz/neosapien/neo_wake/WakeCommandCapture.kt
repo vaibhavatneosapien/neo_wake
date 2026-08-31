@@ -1,5 +1,6 @@
 package xyz.neosapien.neo_wake
 
+import android.util.Log
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -131,8 +132,16 @@ fun isLongEnoughToBeACommand(commandFrames: Int, minFrames: Int): Boolean =
 /**
  * Native mirror of `WakeWordService`'s capture state machine, scoped to
  * JUST the wake-phrase toggle path (U7) — no hold-to-talk here.
+ *
+ * [journal] is optional — null keeps every existing pure-state-machine test
+ * exercising this class with zero disk I/O; [NeoWakeAttach.attach] wires a
+ * real [WakeCommandClipJournalStore] for the live capture (U8-harden /
+ * KTD11 clip-durability).
  */
-class WakeCommandCapture(private var config: WakeCommandCaptureConfig = WakeCommandCaptureConfig()) {
+class WakeCommandCapture(
+    private var config: WakeCommandCaptureConfig = WakeCommandCaptureConfig(),
+    private val journal: WakeCommandClipJournalStore? = null,
+) {
 
     private val ring = WakePrerollRing(config.framesFor(config.prerollWindowMs + config.lagMs))
 
@@ -180,6 +189,18 @@ class WakeCommandCapture(private var config: WakeCommandCaptureConfig = WakeComm
      */
     var onCaptureClosed: ((captureId: String) -> Unit)? = null
 
+    /**
+     * Fired ONLY on a [rehydrate] RESUME (a capture surviving a
+     * jetsam+headless-reconnect re-entering CAPTURING) — never on a fresh
+     * [openClip]. The firmware clears the pendant LEDs on the jetsam
+     * disconnect, so the LED-ON signal must be re-issued even though
+     * [onCaptureOpened] deliberately does NOT re-fire here (see
+     * [rehydrate]'s doc: re-firing it would extend ambient suppression past
+     * its original deadline). The live binding (opus-review fix) is
+     * `NeoBleAudioBridge.setCommandMode(true)` ONLY — no ambient call.
+     */
+    var onCaptureResumed: ((captureId: String) -> Unit)? = null
+
     /** Re-applies a new lag (Remote Config equivalent) without a relaunch. */
     fun reconfigure(newConfig: WakeCommandCaptureConfig) {
         config = newConfig
@@ -192,17 +213,92 @@ class WakeCommandCapture(private var config: WakeCommandCaptureConfig = WakeComm
      * entry point; see this file's header doc for why it is unwired today.
      */
     fun feed(payload: ByteArray, nowMs: Long) {
-        // TODO(U8-harden): mid-command clip JOURNAL — `clip` below is
-        // RAM-only. A jetsam/kill between `openClip` and `closeClip` loses
-        // every frame captured so far; incrementally journaling `clip` to
-        // disk (mirroring `NeoAmbientSuppressionJournal`'s atomic-write
-        // pattern) and rehydrating it on the next attach() would let a
-        // mid-command kill still deliver a (partial) clip instead of none.
         if (state == WakeCaptureState.CAPTURING) {
             clip.add(payload)
+            // U8-harden / KTD11: journal every incrementally-captured frame
+            // so a mid-command jetsam loses at most the frame(s) in flight
+            // at the moment of the kill, not the whole clip.
+            journal?.appendFrame(payload)
         } else {
             ring.add(payload)
         }
+    }
+
+    /**
+     * U8-harden / KTD11 rehydrate. Call once, right after construction (and
+     * after [onClipReady]/[onCaptureClosed] are wired — see
+     * [NeoWakeAttach.attach]), BEFORE the live audio listener registers.
+     *
+     * - No journal, or nothing journaled: no-op (the common case).
+     * - Journaled AND `nowMs < deadlineMs`: RESUME — restore
+     *   `clip`/`clipPrerollFrames`/`clipOpenedAtMs`/`currentCaptureId` and
+     *   re-enter CAPTURING, so the very next live `feed()`/`onFire()`/
+     *   `tick()` call continues the SAME capture. Deliberately does NOT
+     *   re-invoke [onCaptureOpened] — neo_ble's own ambient-suppression
+     *   journal rehydrates independently, from ITS OWN journal (keyed by
+     *   the SAME `captureId`), using the ORIGINAL open time; re-firing
+     *   [onCaptureOpened] here would recompute a fresh, later deadline and
+     *   extend the ambient suppression past what it should be. It DOES fire
+     *   [onCaptureResumed] (opus-review fix) — the pendant LEDs, unlike
+     *   ambient suppression, have no independent rehydrate path of their own
+     *   and firmware clears them on the jetsam disconnect, so the LED-ON
+     *   signal must be re-issued or they stay dark for the rest of this
+     *   resumed command.
+     * - Journaled AND `nowMs >= deadlineMs`: the window already ran out
+     *   while we were dead — finalize immediately with whatever was
+     *   captured (no tail-trim: no live second fire to trim against, same
+     *   as [onDisconnect]'s `trimTail = false`), fire [onCaptureClosed],
+     *   hand a usable clip to [onClipReady], and clear the journal.
+     */
+    fun rehydrate(nowMs: Long): WakeCommandClip? {
+        val j = journal ?: return null
+        val record = j.read() ?: return null
+        if (state != WakeCaptureState.IDLE) return null // defensive: never clobber a live capture
+
+        if (nowMs < record.header.deadlineMs) {
+            clip = record.frames.toMutableList()
+            clipPrerollFrames = minOf(record.header.prerollFrameCount, record.frames.size)
+            clipOpenedAtMs = record.header.openedAtMs
+            currentCaptureId = record.header.captureId
+            state = WakeCaptureState.CAPTURING
+            Log.w(
+                TAG,
+                "clip_journal_rehydrated_resumed capture_id=${record.header.captureId} frames=${record.frames.size}",
+            )
+            onCaptureResumed?.invoke(record.header.captureId)
+            return null
+        }
+
+        Log.w(
+            TAG,
+            "clip_journal_rehydrated_expired capture_id=${record.header.captureId} frames=${record.frames.size}",
+        )
+        val captureId = record.header.captureId
+        val frames = record.frames
+        val prerollFrames = minOf(record.header.prerollFrameCount, frames.size)
+        val commandFrames = frames.size - prerollFrames
+        j.clear()
+        onCaptureClosed?.invoke(captureId)
+
+        if (!isLongEnoughToBeACommand(commandFrames, config.framesFor(config.minCommandMs))) {
+            return null
+        }
+        val commandId = "cmd-$nowMs-$clipCounter"
+        clipCounter += 1
+        val body = flattenOpus(frames)
+        val wakeEndMs = wakeEndMsFromPreroll(prerollFrames, config.lagMs, config.frameMs)
+        val durationMs = frames.size * config.frameMs
+        val result = WakeCommandClip(
+            commandId = commandId,
+            source = WakeCommandSource.WAKE_PHRASE,
+            audioBytes = body,
+            wakeEndMs = wakeEndMs,
+            durationMs = durationMs,
+            closedAtMs = nowMs,
+            reason = "rehydrate_deadline_expired",
+        )
+        onClipReady?.invoke(result)
+        return result
     }
 
     /**
@@ -250,6 +346,13 @@ class WakeCommandCapture(private var config: WakeCommandCaptureConfig = WakeComm
         val captureId = "cap-$nowMs-$captureCounter"
         captureCounter += 1
         currentCaptureId = captureId
+        journal?.openCapture(
+            header = WakeCommandClipJournalHeader(
+                captureId = captureId, openedAtMs = nowMs,
+                deadlineMs = nowMs + config.maxClipMs, prerollFrameCount = clipPrerollFrames,
+            ),
+            prerollFrames = pre,
+        )
         onCaptureOpened?.invoke(captureId)
     }
 
@@ -306,5 +409,10 @@ class WakeCommandCapture(private var config: WakeCommandCaptureConfig = WakeComm
         currentCaptureId = null
         ring.clear()
         state = WakeCaptureState.IDLE
+        journal?.clear()
+    }
+
+    private companion object {
+        const val TAG = "WakeCommandCapture"
     }
 }

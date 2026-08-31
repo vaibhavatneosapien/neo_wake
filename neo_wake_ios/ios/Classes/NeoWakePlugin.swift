@@ -21,6 +21,17 @@ public class NeoWakePlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     private static var events: FlutterEventSink?
     private static let eventsLock = NSLock()
 
+    /// Command-state channel's own sink (command-mode UI parity plan, U2) —
+    /// a separate static from `events`/`detections` because a single
+    /// `FlutterStreamHandler` instance can't disambiguate which of its two
+    /// registered channels an `onListen`/`onCancel` call is for, so this
+    /// channel gets its own handler object (`CommandStateStreamHandler`
+    /// below). `fileprivate` (not `private`): that handler is a sibling type
+    /// in this same file, and Swift's `private` doesn't cross a type
+    /// boundary even within one file.
+    fileprivate static var commandEvents: FlutterEventSink?
+    fileprivate static let commandEventsLock = NSLock()
+
     /// Pushed by `NeoWakeAttach` on every native fire (U8 plan step 2) — a
     /// no-op when nothing is listening. Always dispatches to the main
     /// thread: `NeoWakeAttach.onFire` runs on neo_wake's own frame worker,
@@ -33,6 +44,17 @@ public class NeoWakePlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         DispatchQueue.main.async { sink(payload) }
     }
 
+    /// Pushed by `NeoWakeAttach` on every command-mode open/close/resume
+    /// (command-mode UI parity plan, U2) — a no-op when nothing is
+    /// listening. Mirrors `emitFired`'s main-thread dispatch.
+    public static func emitCommandState(_ on: Bool) {
+        commandEventsLock.lock()
+        let sink = commandEvents
+        commandEventsLock.unlock()
+        guard let sink else { return }
+        DispatchQueue.main.async { sink(on) }
+    }
+
     public static func register(with registrar: FlutterPluginRegistrar) {
         let instance = NeoWakePlugin()
         let methods = FlutterMethodChannel(name: "neo_wake",
@@ -41,6 +63,9 @@ public class NeoWakePlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         let detections = FlutterEventChannel(name: "neo_wake/detections",
                                              binaryMessenger: registrar.messenger())
         detections.setStreamHandler(instance)
+        let commandState = FlutterEventChannel(name: "neo_wake/command_state",
+                                               binaryMessenger: registrar.messenger())
+        commandState.setStreamHandler(CommandStateStreamHandler())
     }
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -79,6 +104,29 @@ public class NeoWakePlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         Self.eventsLock.lock()
         Self.events = nil
         Self.eventsLock.unlock()
+        return nil
+    }
+}
+
+/// Own `FlutterStreamHandler` for `neo_wake/command_state` (command-mode UI
+/// parity plan, U2) — see `NeoWakePlugin.commandEvents`'s doc for why this
+/// can't just be another case in `NeoWakePlugin.onListen`. On subscribe it
+/// immediately posts the current native command-state as the first event, so
+/// a fresh Dart isolate (launch/reconnect) never has to guess.
+private class CommandStateStreamHandler: NSObject, FlutterStreamHandler {
+    func onListen(withArguments arguments: Any?,
+                 eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+        NeoWakePlugin.commandEventsLock.lock()
+        NeoWakePlugin.commandEvents = events
+        NeoWakePlugin.commandEventsLock.unlock()
+        events(NeoWakeAttach.currentCommandMode())
+        return nil
+    }
+
+    func onCancel(withArguments arguments: Any?) -> FlutterError? {
+        NeoWakePlugin.commandEventsLock.lock()
+        NeoWakePlugin.commandEvents = nil
+        NeoWakePlugin.commandEventsLock.unlock()
         return nil
     }
 }

@@ -2,6 +2,9 @@ package xyz.neosapien.neo_wake
 
 import android.content.Context
 import android.util.Log
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 
 /**
  * The live wiring (U8): reads the KTD8 arm record, attaches to neo_ble's
@@ -57,7 +60,31 @@ object NeoWakeAttach {
     private var frameWorker: NeoWakeFrameWorker? = null
     private var configuredHeaderLenOverride: Int = 0
 
+    /** Drives [WakeCommandCapture.tick] once/sec while attached — the
+     * self-healing wall-clock ceiling for a command window neo_wake itself
+     * never closes (no 2nd wake fire, no mic-stop, no disconnect). Fires on
+     * its own thread; the scheduled body hands off to [frameWorker] rather
+     * than calling `tick()` here, since capture state is only ever safe to
+     * mutate on the worker's single thread. */
+    @Volatile private var ceilingTimer: ScheduledExecutorService? = null
+
     val isAttached: Boolean get() = attached
+
+    /** Native command-capture truth (command-mode UI parity plan, U1) — used
+     * both as the `command_state` EventChannel's on-subscribe snapshot and
+     * (U3) as the pull-model provider neo_ble's connect-ready reconcile
+     * reads via [NeoBleAudioBridge.setCommandModeStateProvider]. `false`
+     * (never CAPTURING) whenever nothing is attached, e.g. disarmed. */
+    fun currentCommandMode(): Boolean = commandCapture?.state == WakeCaptureState.CAPTURING
+
+    // neo_ble invokes this when the pendant mic stops while still connected
+    // (sleep / double-tap stop). Force-close any live command capture — its
+    // onCaptureClosed fires setCommandMode(false)+emitCommandState(false).
+    // No-op if idle (onDisconnect guards CAPTURING).
+    fun forceCommandCaptureClosedOnMicStop() {
+        val capture = commandCapture
+        capture?.onDisconnect(System.currentTimeMillis())
+    }
 
     /** Reads neo_ble's persisted uid, or `null` on any failure — a failed
      * read is treated identically to "nobody signed in", never "trust the
@@ -95,16 +122,36 @@ object NeoWakeAttach {
             Log.i(TAG, "bootstrap: no fail-closed-resolved armed record — staying detached")
             return
         }
-        // TODO(U8-harden): KTD13 — a bounded, sequence-aware replay buffer
-        // installed in neo_ble BEFORE its BLE central/GATT callback comes up
-        // would let a relaunch-triggering utterance (spoken before this
-        // attach() below completes and the FIRST live frame arrives) still
-        // reach the spotter, replayed once sessions are ready. Not wired —
-        // this bootstrap only ever sees frames from the moment it attaches.
-        // TODO(U8-harden): reboot restored-connected vs restored-disconnected
-        // policy (R8) — this bootstrap treats every process start the same;
-        // it does not distinguish a post-first-unlock reboot reconnect from
-        // an ordinary headless resurrect, which the plan leaves open.
+        // KTD13 (U8-harden, assessed — NOT wired, deliberately). Android
+        // needs no replay buffer: this bootstrap runs from
+        // [NeoWakeStartup]'s manifest `ContentProvider.onCreate`, which the
+        // OS guarantees executes — synchronously, blocking process attach —
+        // before `Application.onCreate()`, which itself runs before ANY
+        // other component in the process, including the foreground service
+        // that owns the BLE connection (`NeoBleService`) and the
+        // `BootReceiver` that can headlessly start it after a reboot. By the
+        // time this `attach()` call below can even begin registering the
+        // "wake" listener, nothing in the process has had a chance to open a
+        // BLE connection yet, let alone receive an audio-characteristic
+        // notification — there is no gap between "process starts" and
+        // "listener registered" for a frame to arrive into and be lost. See
+        // the iOS twin (`NeoWakeReplayBuffer` in neo_ble) for the platform
+        // that DOES need one, and why.
+        //
+        // R8 reboot policy (U8-harden, assessed — NOT changed). Unlike iOS,
+        // Android's headless-reconnect gate
+        // (`NeoConnectPolicy.shouldReviveHeadless`, driving `BootReceiver`)
+        // already accepts a different-boot-session headless reconnect
+        // unconditionally (gated only on: a remembered device, the user
+        // hasn't paused reconnect, and the service isn't already running) —
+        // there is no "was this a force-quit before the reboot" ambiguity to
+        // resolve on this platform, because Android's revival contract never
+        // encoded that distinction in the first place (a killed process
+        // restarting via `BOOT_COMPLETED` looks identical to any other
+        // automatic revival). So this bootstrap needs no reboot special-case
+        // either: it already treats every process start identically, and
+        // Android's R8 reboot survival already works end-to-end with no
+        // change from this unit.
         attach(context, record)
     }
 
@@ -206,7 +253,10 @@ object NeoWakeAttach {
             },
         )
         val captureConfig = WakeCommandCaptureConfig(lagMs = record.lagMs)
-        val newCapture = WakeCommandCapture(captureConfig)
+        // U8-harden / KTD11: journal the in-progress clip's audio to disk
+        // (context.filesDir — same root neo_ble's own journals use, distinct
+        // filenames) so a mid-command jetsam doesn't lose it.
+        val newCapture = WakeCommandCapture(captureConfig, journal = WakeCommandClipJournalStore(appCtx))
         newCapture.onClipReady = { clip ->
             NeoBleAudioBridge.enqueueCommand(
                 appCtx, clip.commandId, clip.source, clip.wakeEndMs,
@@ -217,10 +267,43 @@ object NeoWakeAttach {
             NeoBleAudioBridge.setAmbientSuppressed(
                 appCtx, true, captureId, System.currentTimeMillis() + AMBIENT_SUPPRESSION_MAX_MS,
             )
+            NeoBleAudioBridge.setCommandMode(true)
+            NeoWakePlugin.emitCommandState(true)
         }
         newCapture.onCaptureClosed = { _ ->
             NeoBleAudioBridge.setAmbientSuppressed(appCtx, false, "", 0L)
+            NeoBleAudioBridge.setCommandMode(false)
+            NeoWakePlugin.emitCommandState(false)
         }
+        // opus-review fix: a resumed clip re-enters CAPTURING without a
+        // fresh onCaptureOpened (see WakeCommandCapture.rehydrate's doc), so
+        // the pendant LEDs — cleared by firmware on the jetsam disconnect —
+        // never get re-lit unless we re-issue setCommandMode(true) here. No
+        // ambient re-suppress: that deadline rehydrates independently on
+        // neo_ble's own side.
+        newCapture.onCaptureResumed = { _ ->
+            NeoBleAudioBridge.setCommandMode(true)
+            NeoWakePlugin.emitCommandState(true)
+        }
+        // Command-mode UI parity plan (U3): register neo_wake's own
+        // command-capture truth as neo_ble's connect-ready reconcile
+        // provider, so a reconnect self-heals the LED without neo_ble ever
+        // importing neo_wake (PULL model). Registered here, after every
+        // capture handler above is wired, so a reconcile firing the instant
+        // it's readable never races an unset callback.
+        NeoBleAudioBridge.setCommandModeStateProvider { currentCommandMode() }
+        // Command-mode force-off plan: neo_ble invokes this when the
+        // pendant's mic stops while the connection stays live (sleep or a
+        // double-tap stop) — a WakeCommandCapture can't see either event on
+        // its own, so this is the third closer alongside wake re-fire / 60s
+        // ceiling / full disconnect.
+        NeoBleAudioBridge.setMicStoppedHandler { forceCommandCaptureClosedOnMicStop() }
+        // U8-harden / KTD11: rehydrate a mid-command clip left journaled by
+        // a prior process (jetsam between openClip/closeClip). MUST run
+        // after the handlers above are wired and BEFORE the audio listener
+        // registers below — see the iOS twin's identical ordering note for
+        // why.
+        newCapture.rehydrate(System.currentTimeMillis())
         // U9 Fix 2 coupling: size neo_ble's ambient pre-roll delay from the
         // SAME config the capture's own pre-roll ring is sized from, instead
         // of neo_ble hand-syncing a constant with WakeCommandCaptureConfig.
@@ -260,6 +343,28 @@ object NeoWakeAttach {
         frameWorker = worker
         attached = true
 
+        // KTD2 ceiling: 60s wall-clock backstop for a command capture with
+        // no 2nd wake fire / mic-stop / disconnect to close it. `tick()` is
+        // cheap (guards state==CAPTURING + the deadline internally) so 1s is
+        // fine; the hand-off through worker.submitTask keeps this off the
+        // frame-processing thread's own serialization rules. Captures
+        // `worker`/`newCapture` (the locals, not the shared fields) — same
+        // reason the audio listener above does.
+        ceilingTimer?.shutdownNow()
+        ceilingTimer = Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "neo-wake-ceiling").apply { isDaemon = true }
+        }.also { sched ->
+            sched.scheduleWithFixedDelay({
+                try {
+                    worker.submitTask { newCapture.tick(System.currentTimeMillis()) }
+                } catch (t: Throwable) {
+                    // A throw here would cancel all future runs of
+                    // scheduleWithFixedDelay — never let it escape.
+                    Log.w(TAG, "ceiling timer tick failed", t)
+                }
+            }, 1000L, 1000L, TimeUnit.MILLISECONDS)
+        }
+
         Log.i(TAG, "attach: wake listener registered=$registered codec=$codec headerLenOverride=$configuredHeaderLenOverride")
     }
 
@@ -297,7 +402,11 @@ object NeoWakeAttach {
 
     @Synchronized
     private fun detach() {
+        ceilingTimer?.shutdownNow()
+        ceilingTimer = null
         NeoBleAudioBridge.removeAudioListener(LISTENER_KEY)
+        NeoBleAudioBridge.setCommandModeStateProvider(null)
+        NeoBleAudioBridge.setMicStoppedHandler(null)
         frameWorker?.shutdown()
         frameWorker = null
         pipeline?.close()
@@ -316,6 +425,8 @@ object NeoWakeAttach {
         spotter = null
         commandCapture = null
         frameWorker = null
+        ceilingTimer?.shutdownNow()
+        ceilingTimer = null
         configuredHeaderLenOverride = 0
         sessionsInit = NeoWakeSessions::ensureInitialized
     }

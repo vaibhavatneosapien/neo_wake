@@ -29,6 +29,7 @@ import io.flutter.plugin.common.MethodChannel.Result
 class NeoWakePlugin : FlutterPlugin, MethodCallHandler, EventChannel.StreamHandler {
     private lateinit var methods: MethodChannel
     private lateinit var detections: EventChannel
+    private lateinit var commandState: EventChannel
     private lateinit var appContext: Context
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -37,6 +38,8 @@ class NeoWakePlugin : FlutterPlugin, MethodCallHandler, EventChannel.StreamHandl
         methods.setMethodCallHandler(this)
         detections = EventChannel(binding.binaryMessenger, "neo_wake/detections")
         detections.setStreamHandler(this)
+        commandState = EventChannel(binding.binaryMessenger, "neo_wake/command_state")
+        commandState.setStreamHandler(CommandStateStreamHandler)
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
@@ -75,7 +78,27 @@ class NeoWakePlugin : FlutterPlugin, MethodCallHandler, EventChannel.StreamHandl
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         methods.setMethodCallHandler(null)
         detections.setStreamHandler(null)
+        commandState.setStreamHandler(null)
         events = null
+        commandEvents = null
+    }
+
+    /** Own [EventChannel.StreamHandler] for `neo_wake/command_state` — a
+     * single plugin instance can't disambiguate two channels sharing one
+     * `onListen`/`onCancel` (command-mode UI parity plan, U1), so this is a
+     * nested handler distinct from the outer class's detections handling. */
+    private object CommandStateStreamHandler : EventChannel.StreamHandler {
+        override fun onListen(arguments: Any?, sink: EventChannel.EventSink?) {
+            commandEvents = sink
+            // Snapshot on subscribe: a fresh listener (launch, reconnect,
+            // hot-reload) must see the CURRENT native truth immediately,
+            // not wait for the next open/close/resume.
+            sink?.success(NeoWakeAttach.currentCommandMode())
+        }
+
+        override fun onCancel(arguments: Any?) {
+            commandEvents = null
+        }
     }
 
     companion object {
@@ -86,6 +109,11 @@ class NeoWakePlugin : FlutterPlugin, MethodCallHandler, EventChannel.StreamHandl
          * engine, which is expected and not an error. */
         @Volatile private var events: EventChannel.EventSink? = null
 
+        /** Whichever [NeoWakePlugin] instance's `command_state` EventChannel
+         * is currently listened to, if any — same headless-null contract as
+         * [events]. */
+        @Volatile private var commandEvents: EventChannel.EventSink? = null
+
         /** Pushed by [NeoWakeAttach] on every native fire (U8 plan step 2) —
          * a no-op when nothing is listening. Always posts to the main
          * thread: [NeoWakeAttach.onFire] runs on neo_wake's own frame
@@ -93,6 +121,14 @@ class NeoWakePlugin : FlutterPlugin, MethodCallHandler, EventChannel.StreamHandl
         fun emitFired(payload: Map<String, Any?>) {
             val sink = events ?: return
             main.post { sink.success(payload) }
+        }
+
+        /** Pushed by [NeoWakeAttach] on every onCaptureOpened/Closed/Resumed
+         * (command-mode UI parity plan, U1) — a no-op when nothing is
+         * listening. Mirrors [emitFired]'s main-thread post. */
+        fun emitCommandState(on: Boolean) {
+            val sink = commandEvents ?: return
+            main.post { sink.success(on) }
         }
     }
 }

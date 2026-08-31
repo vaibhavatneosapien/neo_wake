@@ -76,4 +76,34 @@ class NeoWakeAttachTest {
         assertEquals("a second attach() must actually reattempt, not be " +
             "swallowed by a leftover attached=true latch", 2, sessionInitCalls)
     }
+
+    // Command-mode UI parity plan (U1/U3): `currentCommandMode()` is both
+    // the `command_state` EventChannel's on-subscribe snapshot AND the pull
+    // provider neo_ble's connect-ready reconcile reads. Real capture-open/
+    // close/resume flows (and NeoWakePlugin's `emitCommandState`, which
+    // constructs a `Handler(Looper.getMainLooper())`) need a live Android
+    // frame/Looper this plain JVM test cannot back — see this class's own
+    // doc on why [attach] is exercised directly instead of via a real
+    // capture pipeline. What IS reachable here: the default/failed-attach
+    // state, which is exactly what neo_ble's reconcile falls back to
+    // (`provider?.invoke() ?: false`) whenever nothing is really capturing.
+
+    @Test
+    fun currentCommandMode_whenNeverAttached_isFalse() {
+        assertFalse(NeoWakeAttach.currentCommandMode())
+    }
+
+    @Test
+    fun currentCommandMode_afterAFailedAttach_staysFalse() {
+        NeoWakeAttach.sessionsInit = { }
+
+        NeoWakeAttach.attach(FakeContext(), record())
+
+        assertFalse(NeoWakeAttach.isAttached)
+        assertFalse(
+            "no live WakeCommandCapture after a failed attach — the reconcile " +
+                "provider must read false, not stale/leftover state",
+            NeoWakeAttach.currentCommandMode(),
+        )
+    }
 }

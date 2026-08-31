@@ -16,6 +16,7 @@ class NeoWake {
 
   static const MethodChannel _methods = MethodChannel('neo_wake');
   static const EventChannel _detections = EventChannel('neo_wake/detections');
+  static const EventChannel _commandState = EventChannel('neo_wake/command_state');
 
   /// Verifies the platform channel is wired to the native plugin.
   Future<String?> platformVersion() =>
@@ -56,4 +57,13 @@ class NeoWake {
   /// to stay silent at runtime, which is fine: arming, disarming, and wiring
   /// this stream into the capture path are what U6 is responsible for.
   Stream<dynamic> get detections => _detections.receiveBroadcastStream();
+
+  /// Native command-mode ON/OFF (U6) — replays the CURRENT state immediately
+  /// on subscribe (the native side's own snapshot-on-listen), so a fresh Dart
+  /// isolate (launch, reconnect, hot restart) picks up whatever native is
+  /// doing right now rather than defaulting to idle. `true` = command mode is
+  /// on (a capture is open natively); `false` = off. Maps defensively —
+  /// anything other than a literal `true` decodes as off.
+  Stream<bool> get commandState =>
+      _commandState.receiveBroadcastStream().map((dynamic e) => e == true);
 }

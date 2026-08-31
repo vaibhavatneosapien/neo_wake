@@ -54,6 +54,19 @@ internal class NeoWakeFrameWorker(
         }
     }
 
+    /** Run an O(1) task on the worker's executor — same serialization as
+     * submitted frames, so the ceiling timer can mutate capture state
+     * race-free. No-op after shutdown, mirroring submitFrame. */
+    fun submitTask(task: () -> Unit) {
+        try {
+            executor.execute(task)
+        } catch (e: RejectedExecutionException) {
+            // Shut down / bounded queue full — dropping is fine here: the
+            // ceiling timer fires again in 1s, same as submitFrame dropping
+            // a frame on overflow.
+        }
+    }
+
     /** Stops accepting new frames and drains in-flight work. Not called from
      * the worker thread itself. */
     fun shutdown() {

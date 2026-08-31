@@ -32,6 +32,11 @@ import Foundation
 // `NeoAudioUploader.shared.setAmbientSuppressed(true, captureId:)` on open
 // and `resumeAmbient()` on close — isolating command audio from neo_ble's
 // ambient notes feed for the duration of one capture.
+//
+// U8-harden / KTD11 closes the last piece of that gap: `clip` (the in-flight
+// bytes) was RAM-only, so a mid-command jetsam lost the whole clip even
+// though the ambient-suppression STATE survived via its own journal. See
+// `WakeCommandClipJournal.swift` and this class's `journal`/`rehydrate`.
 
 /// One assembled command clip, ready for the cross-plugin hand-off.
 /// `audioBytes` is ALREADY FRAMED (`flattenOpus`), matching what
@@ -181,13 +186,20 @@ public func isLongEnoughToBeACommand(commandFrames: Int, minFrames: Int) -> Bool
 /// by definition, in the user's hand and the app alive while they hold a
 /// button on its screen).
 public final class WakeCommandCapture {
-    public init(config: WakeCommandCaptureConfig = WakeCommandCaptureConfig()) {
+    /// `journal` is optional — nil keeps every existing pure-state-machine
+    /// test (and the golden-gate unit) exercising this class with zero disk
+    /// I/O; `NeoWakeAttach.attach` wires a real `WakeCommandClipJournalStore`
+    /// for the live capture (U8-harden / KTD11 clip-durability).
+    public init(config: WakeCommandCaptureConfig = WakeCommandCaptureConfig(),
+                journal: WakeCommandClipJournalStore? = nil) {
         self.config = config
         self.ring = WakePrerollRing(maxFrames: config.framesFor(config.prerollWindowMs + config.lagMs))
+        self.journal = journal
     }
 
     private var config: WakeCommandCaptureConfig
     private let ring: WakePrerollRing
+    private let journal: WakeCommandClipJournalStore?
 
     public private(set) var state: WakeCaptureState = .idle
     private var clip: [[UInt8]] = []
@@ -226,6 +238,13 @@ public final class WakeCommandCapture {
     /// feed's resume signal; it must not wait on a clip actually existing.
     public var onCaptureClosed: ((String) -> Void)?
 
+    /// Fired when a mid-command clip is RESUMED from the journal (jetsam
+    /// survived, deadline not yet passed) — the pendant LEDs were dropped by
+    /// the firmware on the jetsam disconnect and must be re-lit for the rest
+    /// of the resumed capture. Deliberately separate from `onCaptureOpened`:
+    /// this must NOT re-arm ambient suppression (see `rehydrate`'s doc).
+    public var onCaptureResumed: ((String) -> Void)?
+
     /// Re-applies a new lag (Remote Config equivalent) without a relaunch —
     /// mirrors Dart's live `PrerollRing.resize` on re-arm.
     public func reconfigure(_ newConfig: WakeCommandCaptureConfig) {
@@ -237,17 +256,86 @@ public final class WakeCommandCapture {
     /// clip while capturing. This is the "hook the pipeline calls per frame"
     /// entry point; see this file's header doc for why it is unwired today.
     public func feed(_ payload: [UInt8], nowMs: Int64) {
-        // TODO(U8-harden): mid-command clip JOURNAL — `clip` below is
-        // RAM-only. A jetsam/kill between `openClip` and `closeClip` loses
-        // every frame captured so far; incrementally journaling `clip` to
-        // disk (mirroring `NeoAmbientSuppressionJournal`'s atomic-write
-        // pattern) and rehydrating it on the next attach() would let a
-        // mid-command kill still deliver a (partial) clip instead of none.
         if state == .capturing {
             clip.append(payload)
+            // U8-harden / KTD11: journal every incrementally-captured frame
+            // so a mid-command jetsam loses at most the frame(s) in flight
+            // at the moment of the kill, not the whole clip.
+            journal?.appendFrame(payload)
         } else {
             ring.add(payload)
         }
+    }
+
+    /// U8-harden / KTD11 rehydrate. Call once, right after construction (and
+    /// after `onClipReady`/`onCaptureClosed` are wired — see
+    /// `NeoWakeAttach.attach`), BEFORE the live audio listener registers.
+    ///
+    /// - No journal, or nothing journaled: no-op (the common case).
+    /// - Journaled AND `nowMs < deadlineMs` (the capture's own `maxClipMs`
+    ///   wall-clock ceiling hasn't passed): RESUME — restore `clip`/
+    ///   `clipPrerollFrames`/`clipOpenedAtMs`/`currentCaptureId` and re-enter
+    ///   `.capturing`, so the very next live `feed()`/`onFire()`/`tick()`
+    ///   call continues the SAME capture as if the kill never happened.
+    ///   Deliberately does NOT re-invoke `onCaptureOpened` — neo_ble's own
+    ///   `NeoAmbientSuppressionJournal` rehydrates independently, from ITS
+    ///   OWN journal (keyed by the SAME `captureId`), using the ORIGINAL
+    ///   open time; re-firing `onCaptureOpened` here would recompute a
+    ///   fresh, later ambient-suppression deadline and extend it past what
+    ///   it should be.
+    /// - Journaled AND `nowMs >= deadlineMs`: the window has already run out
+    ///   while we were dead — finalize immediately with whatever was
+    ///   captured (no tail-trim: there is no live second fire to trim
+    ///   against, same as `onDisconnect`'s `trimTail: false`), fire
+    ///   `onCaptureClosed` (so the ambient feed's live resume signal fires
+    ///   even if neo_ble's own independent deadline-expiry self-heal hasn't
+    ///   run yet), hand a usable clip to `onClipReady`, and clear the
+    ///   journal.
+    @discardableResult
+    public func rehydrate(nowMs: Int64) -> WakeCommandClip? {
+        guard let journal, let record = journal.read() else { return nil }
+        guard state == .idle else { return nil } // defensive: never clobber a live capture
+
+        if nowMs < record.header.deadlineMs {
+            clip = record.frames
+            clipPrerollFrames = min(record.header.prerollFrameCount, record.frames.count)
+            clipOpenedAtMs = record.header.openedAtMs
+            currentCaptureId = record.header.captureId
+            state = .capturing
+            NSLog("[WakeCommandCapture] clip_journal_rehydrated_resumed capture_id=%@ frames=%d",
+                  record.header.captureId, record.frames.count)
+            onCaptureResumed?(record.header.captureId)
+            return nil
+        }
+
+        NSLog("[WakeCommandCapture] clip_journal_rehydrated_expired capture_id=%@ frames=%d",
+              record.header.captureId, record.frames.count)
+        let captureId = record.header.captureId
+        let frames = record.frames
+        let prerollFrames = min(record.header.prerollFrameCount, frames.count)
+        let commandFrames = frames.count - prerollFrames
+        journal.clear()
+        onCaptureClosed?(captureId)
+
+        guard isLongEnoughToBeACommand(commandFrames: commandFrames, minFrames: config.framesFor(config.minCommandMs)) else {
+            return nil
+        }
+        let commandId = "cmd-\(nowMs)-\(clipCounter)"
+        clipCounter += 1
+        let body = flattenOpus(frames)
+        let wakeEndMs = wakeEndMsFromPreroll(prerollFrames: prerollFrames, lagMs: config.lagMs, frameMs: config.frameMs)
+        let durationMs = frames.count * config.frameMs
+        let result = WakeCommandClip(
+            commandId: commandId,
+            source: WakeCommandSource.wakePhrase,
+            audioBytes: body,
+            wakeEndMs: wakeEndMs,
+            durationMs: durationMs,
+            closedAtMs: nowMs,
+            reason: "rehydrate_deadline_expired"
+        )
+        onClipReady?(result)
+        return result
     }
 
     /// One wake-phrase fire. Idle -> opens (drains the pre-roll ring into
@@ -295,6 +383,13 @@ public final class WakeCommandCapture {
         let captureId = "cap-\(nowMs)-\(captureCounter)"
         captureCounter += 1
         currentCaptureId = captureId
+        journal?.openCapture(
+            header: WakeCommandClipJournalHeader(
+                captureId: captureId, openedAtMs: nowMs,
+                deadlineMs: nowMs + Int64(config.maxClipMs), prerollFrameCount: clipPrerollFrames
+            ),
+            prerollFrames: pre
+        )
         onCaptureOpened?(captureId)
     }
 
@@ -345,5 +440,6 @@ public final class WakeCommandCapture {
         currentCaptureId = nil
         ring.clear()
         state = .idle
+        journal?.clear()
     }
 }
