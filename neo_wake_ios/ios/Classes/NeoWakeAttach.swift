@@ -348,6 +348,16 @@ public enum NeoWakeAttach {
         BleEventSinks.shared.removeAudioListener(key: listenerKey)
         NeoBleManager.shared.commandModeStateProvider = nil
         NeoBleManager.shared.micStoppedWhileConnectedHandler = nil
+        // If a command capture is open when we detach (e.g. live disarm /
+        // sign-out mid-capture), clear the pendant LED and the Dart UI directly.
+        // Dropping the capture below without this leaves the LED lit (self-heals
+        // only on the next connect-reconcile) and the Dart command_state UI blue
+        // with no self-heal. Direct clear, not onDisconnect — a disarm must not
+        // upload a partial clip; neither call re-enters `lock`.
+        if commandCapture?.state == .capturing {
+            NeoBleManager.shared.setCommandMode(false)
+            NeoWakePlugin.emitCommandState(false)
+        }
         frameWorker?.shutdown()
         frameWorker = nil
         pipeline = nil
