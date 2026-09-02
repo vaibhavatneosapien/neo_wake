@@ -233,18 +233,21 @@ public enum NeoWakeAttach {
                 audioBytes: Data(clip.audioBytes)
             )
         }
-        // NOTE (wake-live trim): ambient suppression is intentionally NOT wired
-        // here — ambient memories keep recording alongside a post-wake command
-        // capture (product decision). The neo_ble ambient-suppression /
-        // command-LED APIs are not present at this pin, so only the Dart UI
-        // state (emitCommandState -> blue UI) is driven off the capture edges.
+        // NOTE (wake-live): ambient suppression is intentionally NOT wired here
+        // — ambient memories keep recording alongside a post-wake command
+        // capture (product decision). We DO drive the pendant command-mode LED
+        // (NeoBleManager.setCommandMode, via neo_ble's commandModeChar) and the
+        // Dart UI blue state (emitCommandState) off the capture edges.
         newCapture.onCaptureOpened = { _ in
+            NeoBleManager.shared.setCommandMode(true)
             NeoWakePlugin.emitCommandState(true)
         }
         newCapture.onCaptureClosed = { _ in
+            NeoBleManager.shared.setCommandMode(false)
             NeoWakePlugin.emitCommandState(false)
         }
         newCapture.onCaptureResumed = { _ in
+            NeoBleManager.shared.setCommandMode(true)
             NeoWakePlugin.emitCommandState(true)
         }
         // U8-harden / KTD11: rehydrate a mid-command clip left journaled by
@@ -292,10 +295,16 @@ public enum NeoWakeAttach {
         BleEventSinks.shared.addAudioListener(key: listenerKey) { data in
             worker.submitFrame(data)
         }
-        // (wake-live trim) replayBufferedFrames + the command-mode-parity state
-        // providers are omitted: those neo_ble APIs are not present at this pin.
-        // Wake starts from live frames; the LED-parity self-heal is not needed
-        // for detection.
+        // Drain neo_ble's bounded pre-attach replay buffer into the listener
+        // just registered, in sequence order, once — so frames that arrived
+        // during model-load/warm-up aren't lost.
+        BleEventSinks.shared.replayBufferedFrames(toListenerKey: listenerKey)
+        // Command-mode UI/LED parity: let neo_ble PULL our native command-state
+        // truth on its connect-ready reconcile (self-heals the pendant LED on a
+        // reconnect), and force-close a live capture when the mic stops while
+        // still connected. Cleared in detach().
+        NeoBleManager.shared.commandModeStateProvider = { currentCommandMode() }
+        NeoBleManager.shared.micStoppedWhileConnectedHandler = { forceCommandCaptureClosedOnMicStop() }
         NSLog("[NeoWakeAttach] %@", "attach: wake listener registered codec=opus headerLenOverride=\(configuredHeaderLenOverride)")
     }
 
@@ -337,6 +346,8 @@ public enum NeoWakeAttach {
         ceilingTimer?.cancel()
         ceilingTimer = nil
         BleEventSinks.shared.removeAudioListener(key: listenerKey)
+        NeoBleManager.shared.commandModeStateProvider = nil
+        NeoBleManager.shared.micStoppedWhileConnectedHandler = nil
         frameWorker?.shutdown()
         frameWorker = nil
         pipeline = nil
