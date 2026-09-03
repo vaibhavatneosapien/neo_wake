@@ -264,6 +264,25 @@ public enum NeoWakeAttach {
             process: { bytes in onFrame(pipeline: newPipeline, capture: newCapture, raw: bytes) }
         )
 
+        // U4: fire-time wake-check (app-contract §10b). Only wake-phrase
+        // captures reach this hook (it fires from `openClip`), so the check
+        // and the abort are inherently wake-only — the button/hold path lives
+        // in Dart and never touches this. Post the head slice off-thread (the
+        // mic is never blocked), and on an explicit `"no"` stop command mode
+        // immediately by aborting on the worker's serial queue (the id-guard
+        // in `abort` makes a late verdict on a re-opened capture a no-op).
+        newCapture.onWakeCheckSlice = { slice in
+            NeoAudioUploader.shared.checkWake(
+                commandId: slice.commandId,
+                wakeEndMs: slice.wakeEndMs,
+                isOpus: true,
+                slice: Data(slice.audioBytes)
+            ) { isNo in
+                guard isNo else { return }
+                worker.submitTask { newCapture.abort(commandId: slice.commandId) }
+            }
+        }
+
         // 60s wall-clock ceiling (KTD2's tick() had no production caller):
         // drive it every 1s, hopping onto the worker's serial queue so it
         // never races feed()/onFire(). Capture `worker`/`newCapture` locals,

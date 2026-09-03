@@ -114,6 +114,51 @@ final class WakeCommandCaptureTests: XCTestCase {
         XCTAssertEqual(received?.commandId, closed?.commandId)
     }
 
+    // U1/U2: command_id at open + abort path
+
+    func testWakeCheckSliceFiresAtOpenWithCommandIdMatchingTheClip() {
+        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(
+            prerollWindowMs: 50, lagMs: 0, tailTrimMs: 10, maxClipMs: 60_000, minCommandMs: 10, frameMs: 10
+        ))
+        var slice: WakeCheckSlice?
+        cap.onWakeCheckSlice = { slice = $0 }
+        for i in 0..<5 { cap.feed(frame(i), nowMs: Int64(i * 10)) }
+        XCTAssertNil(cap.onFire(nowMs: 50)) // open
+        XCTAssertNotNil(slice, "wake-check slice fires at open")
+        XCTAssertEqual(slice?.wakeEndMs, 50) // 5 preroll frames * 10ms - lag 0
+        for i in 5..<15 { cap.feed(frame(i), nowMs: Int64(50 + (i - 5) * 10)) }
+        let clip = cap.onFire(nowMs: 200)
+        XCTAssertEqual(slice?.commandId, clip?.commandId, "U1: the wake-check id is the clip's id")
+    }
+
+    func testAbortWithMatchingIdClosesWithoutClip() {
+        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(tailTrimMs: 10, minCommandMs: 10))
+        var clipReady = false
+        var closedId: String?
+        var slice: WakeCheckSlice?
+        cap.onClipReady = { _ in clipReady = true }
+        cap.onCaptureClosed = { closedId = $0 }
+        cap.onWakeCheckSlice = { slice = $0 }
+        cap.onFire(nowMs: 0)
+        for i in 0..<20 { cap.feed(frame(i), nowMs: Int64(i * 10)) }
+        cap.abort(commandId: slice!.commandId)
+        XCTAssertEqual(cap.state, .idle)
+        XCTAssertFalse(clipReady, "abort uploads nothing")
+        XCTAssertNotNil(closedId, "abort fires onCaptureClosed (LED off)")
+    }
+
+    func testAbortWithStaleIdIsNoOp() {
+        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(tailTrimMs: 10, minCommandMs: 10))
+        var clipReady = false
+        cap.onClipReady = { _ in clipReady = true }
+        cap.onFire(nowMs: 0)
+        for i in 0..<20 { cap.feed(frame(i), nowMs: Int64(i * 10)) }
+        cap.abort(commandId: "cmd-stale-999")
+        XCTAssertEqual(cap.state, .capturing, "a stale id must not close the live capture")
+        XCTAssertFalse(clipReady)
+        XCTAssertNotNil(cap.onFire(nowMs: 300), "the real toggle-close still works after a no-op abort")
+    }
+
     func testWakeEndMsFromPreroll_matchesDartFormula() {
         XCTAssertEqual(wakeEndMsFromPreroll(prerollFrames: 100, lagMs: 0, frameMs: 10), 1000)
         XCTAssertEqual(wakeEndMsFromPreroll(prerollFrames: 100, lagMs: 300, frameMs: 10), 700)

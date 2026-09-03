@@ -52,6 +52,16 @@ public struct WakeCommandClip {
     public let reason: String
 }
 
+/// The head slice handed to the fire-time wake-check (app-contract §10b): the
+/// drained pre-roll (through `wakeEndMs`), capped to §10b's ≤3 s / ≤256 KB.
+/// `commandId` is the SAME id the eventual clip upload carries, so the
+/// backend can correlate the verdict with the clip.
+public struct WakeCheckSlice {
+    public let commandId: String
+    public let wakeEndMs: Int
+    public let audioBytes: [UInt8]
+}
+
 /// Contract `source` values (app-contract §2) — mirrors Dart's
 /// `_kSourceWake`/`_kSourceButton`.
 public enum WakeCommandSource {
@@ -209,6 +219,12 @@ public final class WakeCommandCapture {
     private var captureCounter = 0
     private var currentCaptureId: String?
 
+    /// The `command_id` minted at OPEN and reused byte-for-byte at close (U1),
+    /// so the fire-time wake-check and the eventual clip upload share one id.
+    /// Nil while idle, and nil on a resumed-rehydrate capture (no open-time
+    /// mint happened) — `closeClip` mints a fallback in that case.
+    private var currentCommandId: String?
+
     /// Delivered once per closed, non-discarded clip. Set by the cross-plugin
     /// hand-off (see this file's header doc) — nil is a legitimate, expected
     /// state until U8 wires it.
@@ -244,6 +260,13 @@ public final class WakeCommandCapture {
     /// of the resumed capture. Deliberately separate from `onCaptureOpened`:
     /// this must NOT re-arm ambient suppression (see `rehydrate`'s doc).
     public var onCaptureResumed: ((String) -> Void)?
+
+    /// Fired the instant a wake-phrase capture OPENS, carrying the head slice
+    /// for the fire-time wake-check (app-contract §10b, U2). Fire-and-forget:
+    /// the handler posts the slice off-thread and must NOT block the open.
+    /// Only fired on an open (not the toggling close), so it always pairs with
+    /// a fresh `currentCommandId`.
+    public var onWakeCheckSlice: ((WakeCheckSlice) -> Void)?
 
     /// Re-applies a new lag (Remote Config equivalent) without a relaunch —
     /// mirrors Dart's live `PrerollRing.resize` on re-arm.
@@ -383,6 +406,11 @@ public final class WakeCommandCapture {
         let captureId = "cap-\(nowMs)-\(captureCounter)"
         captureCounter += 1
         currentCaptureId = captureId
+        // U1: mint the command_id at OPEN so the fire-time wake-check and the
+        // eventual clip upload share one id.
+        let commandId = "cmd-\(nowMs)-\(clipCounter)"
+        clipCounter += 1
+        currentCommandId = commandId
         journal?.openCapture(
             header: WakeCommandClipJournalHeader(
                 captureId: captureId, openedAtMs: nowMs,
@@ -391,10 +419,46 @@ public final class WakeCommandCapture {
             prerollFrames: pre
         )
         onCaptureOpened?(captureId)
+        // U2: hand the head slice (drained pre-roll through wake_end_ms,
+        // capped to §10b's ≤3 s / ≤256 KB) to the fire-time wake-check.
+        let wakeEndMs = wakeEndMsFromPreroll(prerollFrames: clipPrerollFrames, lagMs: config.lagMs, frameMs: config.frameMs)
+        onWakeCheckSlice?(WakeCheckSlice(commandId: commandId, wakeEndMs: wakeEndMs, audioBytes: wakeCheckSlice(from: pre)))
+    }
+
+    /// Caps the drained pre-roll to §10b's slice limits, keeping the NEWEST
+    /// frames (the phrase sits at the tail of the ring; the oldest frames are
+    /// leading room audio). In practice the ring holds ~1.0–1.7 s, so neither
+    /// cap fires — this is a guard, not an expected path.
+    private func wakeCheckSlice(from frames: [[UInt8]]) -> [UInt8] {
+        let maxFrames = config.framesFor(3000)
+        var f = frames.count > maxFrames ? Array(frames.suffix(maxFrames)) : frames
+        var body = flattenOpus(f)
+        while body.count > 256 * 1024, f.count > 1 {
+            f.removeFirst()
+            body = flattenOpus(f)
+        }
+        return body
+    }
+
+    /// Fire-time wake-check verdict `"no"` (app-contract §10b): stop command
+    /// mode immediately and upload nothing. No-op unless this exact capture is
+    /// still open (`commandId` matches) — a verdict that lands after the
+    /// capture already closed or re-opened must not kill the wrong capture.
+    /// Runs on the capture's serial thread, same as `onFire`/`feed` (the
+    /// caller hops the verdict onto it).
+    public func abort(commandId: String) {
+        guard state == .capturing, currentCommandId == commandId else { return }
+        let captureId = currentCaptureId ?? "cap-unknown"
+        resetCapture()
+        onCaptureClosed?(captureId)
     }
 
     private func closeClip(nowMs: Int64, reason: String, trimTail: Bool) -> WakeCommandClip? {
         let captureId = currentCaptureId ?? "cap-\(nowMs)-unknown"
+        // Read the open-time id BEFORE resetCapture nils it (U1). Nil on a
+        // resumed-rehydrate capture (no open-time mint) — fall back to a fresh
+        // mint below.
+        let openCommandId = currentCommandId
         var frames = clip
         if trimTail {
             let trim = min(config.framesFor(config.tailTrimMs), frames.count)
@@ -414,8 +478,13 @@ public final class WakeCommandCapture {
             return nil
         }
 
-        let commandId = "cmd-\(nowMs)-\(clipCounter)"
-        clipCounter += 1
+        let commandId: String
+        if let openCommandId = openCommandId {
+            commandId = openCommandId
+        } else {
+            commandId = "cmd-\(nowMs)-\(clipCounter)"
+            clipCounter += 1
+        }
         let body = flattenOpus(frames)
         let wakeEndMs = wakeEndMsFromPreroll(prerollFrames: prerollFrames, lagMs: config.lagMs, frameMs: config.frameMs)
         let durationMs = frames.count * config.frameMs
@@ -438,6 +507,7 @@ public final class WakeCommandCapture {
         clipPrerollFrames = 0
         clipOpenedAtMs = 0
         currentCaptureId = nil
+        currentCommandId = nil
         ring.clear()
         state = .idle
         journal?.clear()

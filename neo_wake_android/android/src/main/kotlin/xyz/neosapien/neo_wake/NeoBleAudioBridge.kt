@@ -238,6 +238,33 @@ internal object NeoBleAudioBridge {
         }
     }
 
+    /** [NeoAudioUploader.checkWake] — the U4 fire-time wake-check hand-off from
+     * `WakeCommandCapture.onWakeCheckSlice`. Fail-open: if the uploader can't
+     * be reached or reflection fails, proceed (`onVerdict(false)`) — a bridge
+     * failure must never eat a command. The uploader's `checkWake` is public,
+     * non-suspend, callback-based precisely so this reflective call works. */
+    fun checkWake(
+        context: Context,
+        commandId: String,
+        wakeEndMs: Int,
+        isOpus: Boolean,
+        slice: ByteArray,
+        onVerdict: (Boolean) -> Unit,
+    ) {
+        val uploader = uploaderInstance(context) ?: run { onVerdict(false); return }
+        try {
+            val method = uploader.javaClass.getMethod(
+                "checkWake",
+                String::class.java, Int::class.javaPrimitiveType, Boolean::class.javaPrimitiveType,
+                ByteArray::class.java, kotlin.jvm.functions.Function1::class.java,
+            )
+            method.invoke(uploader, commandId, wakeEndMs, isOpus, slice, onVerdict)
+        } catch (t: Throwable) {
+            warn("checkWake", unwrap(t))
+            onVerdict(false)
+        }
+    }
+
     /** [NeoAudioUploader.setAmbientSuppressed] — the U9 hand-off from
      * `WakeCommandCapture.onCaptureOpened`/`onCaptureClosed`. */
     fun setAmbientSuppressed(context: Context, suppressed: Boolean, captureId: String, deadlineMs: Long) {

@@ -317,6 +317,21 @@ object NeoWakeAttach {
             process = { bytes -> onFrame(newPipeline, newCapture, bytes) },
         )
 
+        // U4: fire-time wake-check (app-contract §10b). Only wake-phrase
+        // captures reach this hook (it fires from openClip), so the check and
+        // the abort are inherently wake-only — the button/hold path lives in
+        // Dart and never touches this. Post the head slice off-thread (the mic
+        // is never blocked), and on an explicit "no" stop command mode
+        // immediately by aborting on the worker's serial queue (the id-guard in
+        // abort makes a late verdict on a re-opened capture a no-op). isOpus is
+        // true to match the clip upload (enqueueCommand also sends is_opus=true
+        // for the same bytes).
+        newCapture.onWakeCheckSlice = { slice ->
+            NeoBleAudioBridge.checkWake(appCtx, slice.commandId, slice.wakeEndMs, true, slice.audioBytes) { isNo ->
+                if (isNo) worker.submitTask { newCapture.abort(slice.commandId) }
+            }
+        }
+
         // Fix 1: registration is checked BEFORE anything latches `attached =
         // true`. A soft-failed listener (reflection drift, or neo_ble
         // genuinely absent) used to still flip the latch — sessions built,

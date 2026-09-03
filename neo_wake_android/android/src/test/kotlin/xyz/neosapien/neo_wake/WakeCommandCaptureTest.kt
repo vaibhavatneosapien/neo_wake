@@ -261,4 +261,56 @@ class WakeCommandCaptureTest {
         val clip = cap.onFire(nowMs = 50L)
         assertNotNull(clip)
     }
+
+    // U1/U2: command_id at open + abort path
+
+    @Test
+    fun wakeCheckSliceFiresAtOpenWithCommandIdMatchingTheClip() {
+        val cap = WakeCommandCapture(
+            WakeCommandCaptureConfig(prerollWindowMs = 50, tailTrimMs = 10, minCommandMs = 10, frameMs = 10),
+        )
+        var slice: WakeCheckSlice? = null
+        cap.onWakeCheckSlice = { slice = it }
+        for (i in 0 until 5) cap.feed(frame(i), nowMs = i * 10L)
+        assertNull(cap.onFire(nowMs = 50L)) // open
+        assertNotNull("wake-check slice fires at open", slice)
+        assertEquals(50, slice!!.wakeEndMs) // 5 preroll frames * 10ms - lag 0
+        for (i in 5 until 15) cap.feed(frame(i), nowMs = 50L + (i - 5) * 10L)
+        val clip = cap.onFire(nowMs = 200L)
+        assertEquals("U1: the wake-check id is the clip's id", slice!!.commandId, clip!!.commandId)
+    }
+
+    @Test
+    fun abortWithMatchingIdClosesWithoutClip() {
+        val cap = WakeCommandCapture(
+            WakeCommandCaptureConfig(tailTrimMs = 10, minCommandMs = 10, frameMs = 10),
+        )
+        var clipReady = false
+        var closedId: String? = null
+        var slice: WakeCheckSlice? = null
+        cap.onClipReady = { clipReady = true }
+        cap.onCaptureClosed = { closedId = it }
+        cap.onWakeCheckSlice = { slice = it }
+        cap.onFire(nowMs = 0L)
+        for (i in 0 until 20) cap.feed(frame(i), nowMs = i * 10L)
+        cap.abort(slice!!.commandId)
+        assertEquals(WakeCaptureState.IDLE, cap.state)
+        assertTrue("abort uploads nothing", !clipReady)
+        assertNotNull("abort fires onCaptureClosed (LED off)", closedId)
+    }
+
+    @Test
+    fun abortWithStaleIdIsNoOp() {
+        val cap = WakeCommandCapture(
+            WakeCommandCaptureConfig(tailTrimMs = 10, minCommandMs = 10, frameMs = 10),
+        )
+        var clipReady = false
+        cap.onClipReady = { clipReady = true }
+        cap.onFire(nowMs = 0L)
+        for (i in 0 until 20) cap.feed(frame(i), nowMs = i * 10L)
+        cap.abort("cmd-stale-999")
+        assertEquals("a stale id must not close the live capture", WakeCaptureState.CAPTURING, cap.state)
+        assertTrue(!clipReady)
+        assertNotNull("the real toggle-close still works after a no-op abort", cap.onFire(nowMs = 300L))
+    }
 }

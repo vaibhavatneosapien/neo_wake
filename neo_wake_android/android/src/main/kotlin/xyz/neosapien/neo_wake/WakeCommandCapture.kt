@@ -42,6 +42,18 @@ object WakeCommandSource {
     const val PENDANT_BUTTON = "pendant_button"
 }
 
+/**
+ * The head slice handed to the fire-time wake-check (app-contract §10b): the
+ * drained pre-roll (through [wakeEndMs]), capped to §10b's ≤3 s / ≤256 KB.
+ * [commandId] is the SAME id the eventual clip upload carries, so the backend
+ * can correlate the verdict with the clip.
+ */
+data class WakeCheckSlice(
+    val commandId: String,
+    val wakeEndMs: Int,
+    val audioBytes: ByteArray,
+)
+
 /** What the capture is doing right now — mirrors Dart's `WakePhase`. */
 enum class WakeCaptureState { IDLE, CAPTURING }
 
@@ -155,6 +167,14 @@ class WakeCommandCapture(
     private var currentCaptureId: String? = null
 
     /**
+     * The `command_id` minted at OPEN and reused byte-for-byte at close (U1),
+     * so the fire-time wake-check and the eventual clip upload share one id.
+     * Null while idle, and null on a resumed-rehydrate capture (no open-time
+     * mint happened) — [closeClip] mints a fallback in that case.
+     */
+    private var currentCommandId: String? = null
+
+    /**
      * Delivered once per closed, non-discarded clip. Set by the
      * cross-plugin hand-off (see this file's header doc) — null is a
      * legitimate, expected state until U8 wires it.
@@ -200,6 +220,15 @@ class WakeCommandCapture(
      * `NeoBleAudioBridge.setCommandMode(true)` ONLY — no ambient call.
      */
     var onCaptureResumed: ((captureId: String) -> Unit)? = null
+
+    /**
+     * Fired the instant a wake-phrase capture OPENS, carrying the head slice
+     * for the fire-time wake-check (app-contract §10b, U2). Fire-and-forget:
+     * the handler posts the slice off-thread and must NOT block the open.
+     * Only fired on an open (not the toggling close), so it always pairs with
+     * a fresh [currentCommandId].
+     */
+    var onWakeCheckSlice: ((WakeCheckSlice) -> Unit)? = null
 
     /** Re-applies a new lag (Remote Config equivalent) without a relaunch. */
     fun reconfigure(newConfig: WakeCommandCaptureConfig) {
@@ -346,6 +375,11 @@ class WakeCommandCapture(
         val captureId = "cap-$nowMs-$captureCounter"
         captureCounter += 1
         currentCaptureId = captureId
+        // U1: mint the command_id at OPEN so the fire-time wake-check and the
+        // eventual clip upload share one id.
+        val commandId = "cmd-$nowMs-$clipCounter"
+        clipCounter += 1
+        currentCommandId = commandId
         journal?.openCapture(
             header = WakeCommandClipJournalHeader(
                 captureId = captureId, openedAtMs = nowMs,
@@ -354,10 +388,49 @@ class WakeCommandCapture(
             prerollFrames = pre,
         )
         onCaptureOpened?.invoke(captureId)
+        // U2: hand the head slice (drained pre-roll through wake_end_ms, capped
+        // to §10b's ≤3 s / ≤256 KB) to the fire-time wake-check.
+        val wakeEndMs = wakeEndMsFromPreroll(clipPrerollFrames, config.lagMs, config.frameMs)
+        onWakeCheckSlice?.invoke(WakeCheckSlice(commandId, wakeEndMs, wakeCheckSlice(pre)))
+    }
+
+    /**
+     * Caps the drained pre-roll to §10b's slice limits, keeping the NEWEST
+     * frames (the phrase sits at the tail of the ring; the oldest frames are
+     * leading room audio). In practice the ring holds ~1.0–1.7 s, so neither
+     * cap fires — this is a guard, not an expected path.
+     */
+    private fun wakeCheckSlice(frames: List<ByteArray>): ByteArray {
+        val maxFrames = config.framesFor(3000)
+        var f = if (frames.size > maxFrames) frames.takeLast(maxFrames) else frames
+        var body = flattenOpus(f)
+        while (body.size > 256 * 1024 && f.size > 1) {
+            f = f.drop(1)
+            body = flattenOpus(f)
+        }
+        return body
+    }
+
+    /**
+     * Fire-time wake-check verdict `"no"` (app-contract §10b): stop command
+     * mode immediately and upload nothing. No-op unless this exact capture is
+     * still open ([commandId] matches) — a verdict that lands after the capture
+     * already closed or re-opened must not kill the wrong capture. Runs on the
+     * capture's serial thread, same as [onFire]/[feed] (the caller hops the
+     * verdict onto it).
+     */
+    fun abort(commandId: String) {
+        if (state != WakeCaptureState.CAPTURING || currentCommandId != commandId) return
+        val captureId = currentCaptureId ?: "cap-unknown"
+        resetCapture()
+        onCaptureClosed?.invoke(captureId)
     }
 
     private fun closeClip(nowMs: Long, reason: String, trimTail: Boolean): WakeCommandClip? {
         val captureId = currentCaptureId ?: "cap-$nowMs-unknown"
+        // Read the open-time id BEFORE resetCapture nulls it (U1). Null on a
+        // resumed-rehydrate capture (no open-time mint) — fall back below.
+        val openCommandId = currentCommandId
         var frames: List<ByteArray> = clip
         if (trimTail) {
             val trim = minOf(config.framesFor(config.tailTrimMs), frames.size)
@@ -383,8 +456,11 @@ class WakeCommandCapture(
             return null
         }
 
-        val commandId = "cmd-$nowMs-$clipCounter"
-        clipCounter += 1
+        val commandId = openCommandId ?: run {
+            val c = "cmd-$nowMs-$clipCounter"
+            clipCounter += 1
+            c
+        }
         val body = flattenOpus(frames)
         val wakeEndMs = wakeEndMsFromPreroll(prerollFrames, config.lagMs, config.frameMs)
         val durationMs = frames.size * config.frameMs
@@ -407,6 +483,7 @@ class WakeCommandCapture(
         clipPrerollFrames = 0
         clipOpenedAtMs = 0
         currentCaptureId = null
+        currentCommandId = null
         ring.clear()
         state = WakeCaptureState.IDLE
         journal?.clear()
