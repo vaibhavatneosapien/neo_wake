@@ -121,6 +121,7 @@ class WakeCommandClipJournalTest {
     // ---- WakeCommandCapture.rehydrate --------------------------------------
 
     private fun config() = WakeCommandCaptureConfig(
+        repeatDebounceMs = 0, // journal tests toggle inside the real 1500 ms window on purpose
         prerollWindowMs = 50, tailTrimMs = 10, minCommandMs = 10, frameMs = 10, maxClipMs = 1000,
     )
 

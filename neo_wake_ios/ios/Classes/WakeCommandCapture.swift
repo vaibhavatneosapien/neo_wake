@@ -81,13 +81,15 @@ public enum WakeCaptureState {
 /// has no build-time flag mechanism of its own yet.
 public struct WakeCommandCaptureConfig {
     public init(
-        prerollWindowMs: Int = 1000,
+        repeatDebounceMs: Int = 1500,
+        prerollWindowMs: Int = 1300,
         lagMs: Int = 0,
         tailTrimMs: Int = 1500,
         maxClipMs: Int = 60_000,
         minCommandMs: Int = 200,
         frameMs: Int = 10
     ) {
+        self.repeatDebounceMs = repeatDebounceMs
         self.prerollWindowMs = prerollWindowMs
         self.lagMs = lagMs
         self.tailTrimMs = tailTrimMs
@@ -96,6 +98,16 @@ public struct WakeCommandCaptureConfig {
         self.frameMs = frameMs
     }
 
+    /// A second fire this soon after a capture OPENED is the same utterance
+    /// (or a deliberate repeat — PRD E6: a repeat is the same session, never
+    /// a stop) and is absorbed instead of toggling the capture closed. The
+    /// detector itself has no timer (chorus6's hysteresis + ring reset own
+    /// re-fire suppression); this guards only the open/close toggle.
+    public var repeatDebounceMs: Int
+    /// Must hold the whole spoken phrase plus the fire-lag: "wake up neo" runs
+    /// ~1.2 s and chorus6 fires ~80 ms after it ends, so 1300 keeps the first
+    /// syllable inside the wake-check slice and the clip. Stays under the 1500
+    /// that once tripped the backend's phrase-cut window.
     public var prerollWindowMs: Int
     /// The classifier's fire-lag (Remote Config on the Dart side; a plain
     /// field here). The ring is sized `prerollWindowMs + lagMs`.
@@ -379,13 +391,17 @@ public final class WakeCommandCapture {
     }
 
     /// One wake-phrase fire. Idle -> opens (drains the pre-roll ring into
-    /// the clip). Capturing -> closes with the tail trimmed (the SAME
-    /// phrase toggles both edges until an "end word" model exists — mirrors
-    /// Dart's own `_onDetection`).
+    /// the clip). Capturing -> closes with the tail trimmed (the SAME phrase
+    /// toggles both edges), unless the fire lands inside
+    /// `repeatDebounceMs` of the open, which absorbs it as a repeat.
     @discardableResult
     public func onFire(nowMs: Int64, prerollFramesAtArrival: Int? = nil) -> WakeCommandClip? {
         if state == .idle {
             openClip(nowMs: nowMs, prerollFramesAtArrival: prerollFramesAtArrival ?? ring.count)
+            return nil
+        } else if nowMs - clipOpenedAtMs < Int64(config.repeatDebounceMs) {
+            NSLog("[WakeCommandCapture] wake_repeat_absorbed age_ms=%lld capture_id=%@",
+                  nowMs - clipOpenedAtMs, currentCaptureId ?? "")
             return nil
         } else {
             return closeClip(nowMs: nowMs, reason: "wake_word", trimTail: true)

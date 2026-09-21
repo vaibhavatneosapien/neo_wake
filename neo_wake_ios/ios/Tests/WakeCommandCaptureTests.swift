@@ -29,6 +29,7 @@ final class WakeCommandCaptureTests: XCTestCase {
 
     func testClipCarriesThePrerollRingContent() {
         let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(
+            repeatDebounceMs: 0, // toggle tests run inside the real 1500 ms window on purpose
             prerollWindowMs: 50, lagMs: 0, tailTrimMs: 10, maxClipMs: 60_000, minCommandMs: 50, frameMs: 10
         ))
         for i in 0..<5 { cap.feed(frame(i), nowMs: Int64(i * 10)) }
@@ -51,6 +52,7 @@ final class WakeCommandCaptureTests: XCTestCase {
 
     func testSecondFireClosesAndTailTrimDropsTheClosingPhrase() {
         let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(
+            repeatDebounceMs: 0, // toggle tests run inside the real 1500 ms window on purpose
             prerollWindowMs: 10, lagMs: 0, tailTrimMs: 30, maxClipMs: 60_000, minCommandMs: 10, frameMs: 10
         ))
         cap.onFire(nowMs: 0)
@@ -65,6 +67,7 @@ final class WakeCommandCaptureTests: XCTestCase {
 
     func testNoSecondFire_wallClockCeilingClosesTheWindow() {
         let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(
+            repeatDebounceMs: 0, // toggle tests run inside the real 1500 ms window on purpose
             prerollWindowMs: 1000, lagMs: 0, tailTrimMs: 1500, maxClipMs: 1000, minCommandMs: 10, frameMs: 10
         ))
         cap.onFire(nowMs: 0)
@@ -81,7 +84,7 @@ final class WakeCommandCaptureTests: XCTestCase {
     }
 
     func testDisconnectMidCapture_finalizesWithoutTrim() {
-        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(minCommandMs: 10))
+        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(repeatDebounceMs: 0, minCommandMs: 10))
         cap.onFire(nowMs: 0)
         for i in 0..<20 { cap.feed(frame(i), nowMs: Int64(i * 10)) }
 
@@ -95,6 +98,7 @@ final class WakeCommandCaptureTests: XCTestCase {
 
     func testTooShortAfterTrim_isDiscarded_returnsNil() {
         let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(
+            repeatDebounceMs: 0, // toggle tests run inside the real 1500 ms window on purpose
             prerollWindowMs: 1000, lagMs: 0, tailTrimMs: 1500, maxClipMs: 60_000, minCommandMs: 200, frameMs: 10
         ))
         cap.onFire(nowMs: 0)
@@ -104,7 +108,7 @@ final class WakeCommandCaptureTests: XCTestCase {
     }
 
     func testOnClipReadyCallbackFires() {
-        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(tailTrimMs: 10, minCommandMs: 10))
+        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(repeatDebounceMs: 0, tailTrimMs: 10, minCommandMs: 10))
         var received: WakeCommandClip?
         cap.onClipReady = { received = $0 }
         cap.onFire(nowMs: 0)
@@ -118,6 +122,7 @@ final class WakeCommandCaptureTests: XCTestCase {
 
     func testWakeCheckSliceFiresAtOpenWithCommandIdMatchingTheClip() {
         let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(
+            repeatDebounceMs: 0, // toggle tests run inside the real 1500 ms window on purpose
             prerollWindowMs: 50, lagMs: 0, tailTrimMs: 10, maxClipMs: 60_000, minCommandMs: 10, frameMs: 10
         ))
         var slice: WakeCheckSlice?
@@ -132,7 +137,7 @@ final class WakeCommandCaptureTests: XCTestCase {
     }
 
     func testAbortWithMatchingIdClosesWithoutClip() {
-        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(tailTrimMs: 10, minCommandMs: 10))
+        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(repeatDebounceMs: 0, tailTrimMs: 10, minCommandMs: 10))
         var clipReady = false
         var closedId: String?
         var slice: WakeCheckSlice?
@@ -148,7 +153,7 @@ final class WakeCommandCaptureTests: XCTestCase {
     }
 
     func testAbortWithStaleIdIsNoOp() {
-        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(tailTrimMs: 10, minCommandMs: 10))
+        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(repeatDebounceMs: 0, tailTrimMs: 10, minCommandMs: 10))
         var clipReady = false
         cap.onClipReady = { _ in clipReady = true }
         cap.onFire(nowMs: 0)
@@ -180,7 +185,7 @@ final class WakeCommandCaptureTests: XCTestCase {
     // MARK: - U9 / KTD11 ambient/command isolation seam
 
     func testOnCaptureOpenedFiresOnceOnTheWakeFireThatOpensNotOnTheCloseFire() {
-        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(minCommandMs: 10, frameMs: 10))
+        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(repeatDebounceMs: 0, minCommandMs: 10, frameMs: 10))
         var opened: [String] = []
         cap.onCaptureOpened = { opened.append($0) }
 
@@ -194,7 +199,7 @@ final class WakeCommandCaptureTests: XCTestCase {
     }
 
     func testOnCaptureClosedFiresWithTheSameCaptureIdOnTheClosingFire() {
-        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(tailTrimMs: 10, minCommandMs: 10, frameMs: 10))
+        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(repeatDebounceMs: 0, tailTrimMs: 10, minCommandMs: 10, frameMs: 10))
         var opened: [String] = []
         var closed: [String] = []
         cap.onCaptureOpened = { opened.append($0) }
@@ -212,6 +217,7 @@ final class WakeCommandCaptureTests: XCTestCase {
 
     func testOnCaptureClosedFiresEvenWhenTheClipIsDiscardedAsTooShort() {
         let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(
+            repeatDebounceMs: 0, // toggle tests run inside the real 1500 ms window on purpose
             prerollWindowMs: 1000, lagMs: 0, tailTrimMs: 1500, maxClipMs: 60_000, minCommandMs: 200, frameMs: 10
         ))
         var closedCount = 0
@@ -230,6 +236,7 @@ final class WakeCommandCaptureTests: XCTestCase {
 
     func testOnCaptureClosedFiresOnTheWallClockCeiling() {
         let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(
+            repeatDebounceMs: 0, // toggle tests run inside the real 1500 ms window on purpose
             prerollWindowMs: 1000, lagMs: 0, tailTrimMs: 1500, maxClipMs: 1000, minCommandMs: 10, frameMs: 10
         ))
         var openedId: String?
@@ -247,7 +254,7 @@ final class WakeCommandCaptureTests: XCTestCase {
     }
 
     func testOnCaptureClosedFiresOnDisconnectMidCaptureButNotWhenIdle() {
-        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(minCommandMs: 10, frameMs: 10))
+        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(repeatDebounceMs: 0, minCommandMs: 10, frameMs: 10))
         var closedCount = 0
         cap.onCaptureClosed = { _ in closedCount += 1 }
 
@@ -262,7 +269,7 @@ final class WakeCommandCaptureTests: XCTestCase {
     }
 
     func testCaptureHooksDefaultToNilDormantByDesign() {
-        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(tailTrimMs: 10, minCommandMs: 10, frameMs: 10))
+        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(repeatDebounceMs: 0, tailTrimMs: 10, minCommandMs: 10, frameMs: 10))
         XCTAssertNil(cap.onCaptureOpened)
         XCTAssertNil(cap.onCaptureClosed)
 
@@ -272,5 +279,36 @@ final class WakeCommandCaptureTests: XCTestCase {
         for i in 0..<5 { cap.feed(frame(i), nowMs: Int64(i * 10)) }
         let clip = cap.onFire(nowMs: 50)
         XCTAssertNotNil(clip)
+    }
+    func testRepeatFireInsideTheDebounceIsAbsorbed_aLaterFireStillCloses() {
+        let cap = WakeCommandCapture(config: WakeCommandCaptureConfig(tailTrimMs: 10, minCommandMs: 10, frameMs: 10))
+        var opened = 0
+        var closed = 0
+        cap.onCaptureOpened = { _ in opened += 1 }
+        cap.onCaptureClosed = { _ in closed += 1 }
+        for i in 0..<5 { cap.feed(frame(i), nowMs: Int64(i * 10)) }
+
+        XCTAssertNil(cap.onFire(nowMs: 1000)) // opens
+        XCTAssertEqual(cap.state, .capturing)
+        for i in 0..<250 { cap.feed(frame(i), nowMs: 1000 + Int64(i * 10)) }
+
+        XCTAssertNil(cap.onFire(nowMs: 1800), "a fire 800 ms after open is the same utterance/repeat, never a close")
+        XCTAssertEqual(cap.state, .capturing)
+        XCTAssertEqual(opened, 1)
+        XCTAssertEqual(closed, 0)
+
+        let clip = cap.onFire(nowMs: 2600) // 1600 ms after open: a real close
+        XCTAssertNotNil(clip)
+        XCTAssertEqual(clip?.reason, "wake_word")
+        XCTAssertEqual(cap.state, .idle)
+        XCTAssertEqual(closed, 1)
+    }
+
+    func testDefaultConfig_prerollRingHoldsPhrasePlusLag() {
+        let config = WakeCommandCaptureConfig(lagMs: 80)
+        XCTAssertEqual(config.prerollWindowMs, 1300)
+        XCTAssertEqual(config.repeatDebounceMs, 1500)
+        XCTAssertEqual(config.framesFor(config.prerollWindowMs + config.lagMs), 138)
+        XCTAssertEqual(wakeEndMsFromPreroll(prerollFrames: 138, lagMs: 80), 1300)
     }
 }

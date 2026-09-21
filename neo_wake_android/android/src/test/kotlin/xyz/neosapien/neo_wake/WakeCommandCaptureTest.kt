@@ -35,7 +35,7 @@ class WakeCommandCaptureTest {
     @Test
     fun fireOpensAndAssemblesClipFromPrerollRing_taggedWakePhrase() {
         val cap = WakeCommandCapture(
-            WakeCommandCaptureConfig(prerollWindowMs = 50, tailTrimMs = 10, minCommandMs = 10, frameMs = 10),
+            WakeCommandCaptureConfig(repeatDebounceMs = 0, prerollWindowMs = 50, tailTrimMs = 10, minCommandMs = 10, frameMs = 10),
         )
         // 5 idle frames feed the ring (preroll window = 5 frames @ 10ms).
         for (i in 0 until 5) cap.feed(frame(i), nowMs = i * 10L)
@@ -57,7 +57,7 @@ class WakeCommandCaptureTest {
     @Test
     fun clipCarriesThePrerollRingContent() {
         val cap = WakeCommandCapture(
-            WakeCommandCaptureConfig(prerollWindowMs = 50, tailTrimMs = 10, minCommandMs = 50, frameMs = 10),
+            WakeCommandCaptureConfig(repeatDebounceMs = 0, prerollWindowMs = 50, tailTrimMs = 10, minCommandMs = 50, frameMs = 10),
         )
         val prerollFrames = (0 until 5).map { frame(it) }
         prerollFrames.forEachIndexed { i, f -> cap.feed(f, nowMs = i * 10L) }
@@ -77,7 +77,7 @@ class WakeCommandCaptureTest {
     @Test
     fun secondFireClosesAndTailTrimDropsTheClosingPhrase() {
         val cap = WakeCommandCapture(
-            WakeCommandCaptureConfig(prerollWindowMs = 10, tailTrimMs = 30, minCommandMs = 10, frameMs = 10),
+            WakeCommandCaptureConfig(repeatDebounceMs = 0, prerollWindowMs = 10, tailTrimMs = 30, minCommandMs = 10, frameMs = 10),
         )
         cap.onFire(nowMs = 0L)
         // 10 command frames, then simulate the closing "neo simsim" as the
@@ -95,7 +95,7 @@ class WakeCommandCaptureTest {
     @Test
     fun noSecondFire_wallClockCeilingClosesTheWindow() {
         val cap = WakeCommandCapture(
-            WakeCommandCaptureConfig(maxClipMs = 1000, minCommandMs = 10, frameMs = 10),
+            WakeCommandCaptureConfig(repeatDebounceMs = 0, maxClipMs = 1000, minCommandMs = 10, frameMs = 10),
         )
         cap.onFire(nowMs = 0L)
         for (i in 0 until 50) cap.feed(frame(i), nowMs = i * 10L)
@@ -111,7 +111,7 @@ class WakeCommandCaptureTest {
 
     @Test
     fun disconnectMidCapture_finalizesWithoutTrim() {
-        val cap = WakeCommandCapture(WakeCommandCaptureConfig(minCommandMs = 10, frameMs = 10))
+        val cap = WakeCommandCapture(WakeCommandCaptureConfig(repeatDebounceMs = 0, minCommandMs = 10, frameMs = 10))
         cap.onFire(nowMs = 0L)
         for (i in 0 until 20) cap.feed(frame(i), nowMs = i * 10L)
 
@@ -125,7 +125,7 @@ class WakeCommandCaptureTest {
     @Test
     fun tooShortAfterTrim_isDiscarded_returnsNull() {
         val cap = WakeCommandCapture(
-            WakeCommandCaptureConfig(tailTrimMs = 1500, minCommandMs = 200, frameMs = 10),
+            WakeCommandCaptureConfig(repeatDebounceMs = 0, tailTrimMs = 1500, minCommandMs = 200, frameMs = 10),
         )
         cap.onFire(nowMs = 0L)
         for (i in 0 until 10) cap.feed(frame(i), nowMs = i * 10L) // 100ms of command
@@ -161,7 +161,7 @@ class WakeCommandCaptureTest {
 
     @Test
     fun onCaptureOpened_firesOnceOnTheWakeFireThatOpens_notOnTheCloseFire() {
-        val cap = WakeCommandCapture(WakeCommandCaptureConfig(minCommandMs = 10, frameMs = 10))
+        val cap = WakeCommandCapture(WakeCommandCaptureConfig(repeatDebounceMs = 0, minCommandMs = 10, frameMs = 10))
         val opened = mutableListOf<String>()
         cap.onCaptureOpened = { opened.add(it) }
 
@@ -177,7 +177,7 @@ class WakeCommandCaptureTest {
     @Test
     fun onCaptureClosed_firesWithTheSameCaptureIdOnTheClosingFire() {
         val cap = WakeCommandCapture(
-            WakeCommandCaptureConfig(tailTrimMs = 10, minCommandMs = 10, frameMs = 10),
+            WakeCommandCaptureConfig(repeatDebounceMs = 0, tailTrimMs = 10, minCommandMs = 10, frameMs = 10),
         )
         val opened = mutableListOf<String>()
         val closed = mutableListOf<String>()
@@ -197,7 +197,7 @@ class WakeCommandCaptureTest {
     @Test
     fun onCaptureClosed_firesEvenWhenTheClipIsDiscardedAsTooShort() {
         val cap = WakeCommandCapture(
-            WakeCommandCaptureConfig(tailTrimMs = 1500, minCommandMs = 200, frameMs = 10),
+            WakeCommandCaptureConfig(repeatDebounceMs = 0, tailTrimMs = 1500, minCommandMs = 200, frameMs = 10),
         )
         var closedCount = 0
         var clipReadyCount = 0
@@ -215,7 +215,7 @@ class WakeCommandCaptureTest {
 
     @Test
     fun onCaptureClosed_firesOnTheWallClockCeiling() {
-        val cap = WakeCommandCapture(WakeCommandCaptureConfig(maxClipMs = 1000, minCommandMs = 10, frameMs = 10))
+        val cap = WakeCommandCapture(WakeCommandCaptureConfig(repeatDebounceMs = 0, maxClipMs = 1000, minCommandMs = 10, frameMs = 10))
         var closedId: String? = null
         var openedId: String? = null
         cap.onCaptureOpened = { openedId = it }
@@ -232,7 +232,7 @@ class WakeCommandCaptureTest {
 
     @Test
     fun onCaptureClosed_firesOnDisconnectMidCapture_butNotWhenIdle() {
-        val cap = WakeCommandCapture(WakeCommandCaptureConfig(minCommandMs = 10, frameMs = 10))
+        val cap = WakeCommandCapture(WakeCommandCaptureConfig(repeatDebounceMs = 0, minCommandMs = 10, frameMs = 10))
         var closedCount = 0
         cap.onCaptureClosed = { closedCount++ }
 
@@ -249,7 +249,7 @@ class WakeCommandCaptureTest {
     @Test
     fun captureHooks_defaultToNull_dormantByDesign() {
         val cap = WakeCommandCapture(
-            WakeCommandCaptureConfig(tailTrimMs = 10, minCommandMs = 10, frameMs = 10),
+            WakeCommandCaptureConfig(repeatDebounceMs = 0, tailTrimMs = 10, minCommandMs = 10, frameMs = 10),
         )
         assertNull(cap.onCaptureOpened)
         assertNull(cap.onCaptureClosed)
@@ -267,7 +267,7 @@ class WakeCommandCaptureTest {
     @Test
     fun wakeCheckSliceFiresAtOpenWithCommandIdMatchingTheClip() {
         val cap = WakeCommandCapture(
-            WakeCommandCaptureConfig(prerollWindowMs = 50, tailTrimMs = 10, minCommandMs = 10, frameMs = 10),
+            WakeCommandCaptureConfig(repeatDebounceMs = 0, prerollWindowMs = 50, tailTrimMs = 10, minCommandMs = 10, frameMs = 10),
         )
         var slice: WakeCheckSlice? = null
         cap.onWakeCheckSlice = { slice = it }
@@ -283,7 +283,7 @@ class WakeCommandCaptureTest {
     @Test
     fun abortWithMatchingIdClosesWithoutClip() {
         val cap = WakeCommandCapture(
-            WakeCommandCaptureConfig(tailTrimMs = 10, minCommandMs = 10, frameMs = 10),
+            WakeCommandCaptureConfig(repeatDebounceMs = 0, tailTrimMs = 10, minCommandMs = 10, frameMs = 10),
         )
         var clipReady = false
         var closedId: String? = null
@@ -302,7 +302,7 @@ class WakeCommandCaptureTest {
     @Test
     fun abortWithStaleIdIsNoOp() {
         val cap = WakeCommandCapture(
-            WakeCommandCaptureConfig(tailTrimMs = 10, minCommandMs = 10, frameMs = 10),
+            WakeCommandCaptureConfig(repeatDebounceMs = 0, tailTrimMs = 10, minCommandMs = 10, frameMs = 10),
         )
         var clipReady = false
         cap.onClipReady = { clipReady = true }
@@ -312,5 +312,38 @@ class WakeCommandCaptureTest {
         assertEquals("a stale id must not close the live capture", WakeCaptureState.CAPTURING, cap.state)
         assertTrue(!clipReady)
         assertNotNull("the real toggle-close still works after a no-op abort", cap.onFire(nowMs = 300L))
+    }
+    @Test
+    fun repeatFireInsideTheDebounceIsAbsorbed_aLaterFireStillCloses() {
+        val cap = WakeCommandCapture(WakeCommandCaptureConfig(tailTrimMs = 10, minCommandMs = 10, frameMs = 10))
+        var opened = 0
+        var closed = 0
+        cap.onCaptureOpened = { opened++ }
+        cap.onCaptureClosed = { closed++ }
+        for (i in 0 until 5) cap.feed(frame(i), nowMs = i * 10L)
+
+        assertNull(cap.onFire(nowMs = 1000L)) // opens
+        assertEquals(WakeCaptureState.CAPTURING, cap.state)
+        for (i in 0 until 250) cap.feed(frame(i), nowMs = 1000L + i * 10L)
+
+        assertNull("a fire 800 ms after open is the same utterance/repeat, never a close", cap.onFire(nowMs = 1800L))
+        assertEquals(WakeCaptureState.CAPTURING, cap.state)
+        assertEquals(1, opened)
+        assertEquals(0, closed)
+
+        val clip = cap.onFire(nowMs = 2600L) // 1600 ms after open: a real close
+        assertNotNull(clip)
+        assertEquals("wake_word", clip!!.reason)
+        assertEquals(WakeCaptureState.IDLE, cap.state)
+        assertEquals(1, closed)
+    }
+
+    @Test
+    fun defaultConfig_prerollRingHoldsPhrasePlusLag() {
+        val config = WakeCommandCaptureConfig(lagMs = 80)
+        assertEquals(1300, config.prerollWindowMs)
+        assertEquals(1500, config.repeatDebounceMs)
+        assertEquals(138, config.framesFor(config.prerollWindowMs + config.lagMs))
+        assertEquals(1300, wakeEndMsFromPreroll(prerollFrames = 138, lagMs = 80))
     }
 }

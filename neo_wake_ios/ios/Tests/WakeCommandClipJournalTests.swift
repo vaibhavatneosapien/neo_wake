@@ -122,7 +122,7 @@ final class WakeCommandClipJournalTests: XCTestCase {
     // MARK: - WakeCommandCapture.rehydrate
 
     private func config() -> WakeCommandCaptureConfig {
-        var c = WakeCommandCaptureConfig()
+        var c = WakeCommandCaptureConfig(repeatDebounceMs: 0) // journal tests toggle inside the real 1500 ms window on purpose
         c.prerollWindowMs = 50
         c.tailTrimMs = 10
         c.minCommandMs = 10
