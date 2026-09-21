@@ -1,0 +1,104 @@
+{
+  "burst_-30dBFS": {
+    "audio_sha_head": [
+      0.003993,
+      -0.004196,
+      0.02034,
+      0.003332,
+      -0.017013
+    ],
+    "logmel_first_frame_first5": [
+      -2.81919,
+      -2.84244,
+      -2.79428,
+      -2.78229,
+      -2.87169
+    ],
+    "logmel_mean": 9e-06,
+    "logmel_std": 6.030303,
+    "probs": [
+      0.959594,
+      0.022942,
+      0.017464
+    ],
+    "wake_score": 0.040406
+  },
+  "burst_-45dBFS": {
+    "audio_sha_head": [
+      -0.004364,
+      0.003842,
+      -0.004822,
+      -0.006159,
+      -0.01168
+    ],
+    "logmel_first_frame_first5": [
+      -1.91953,
+      -1.8872,
+      -1.86087,
+      -1.87319,
+      -1.94583
+    ],
+    "logmel_mean": 5e-06,
+    "logmel_std": 4.221118,
+    "probs": [
+      0.962469,
+      0.018658,
+      0.018873
+    ],
+    "wake_score": 0.037531
+  },
+  "silence": {
+    "audio_sha_head": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "logmel_first_frame_first5": [
+      -1e-05,
+      -1e-05,
+      -1e-05,
+      -1e-05,
+      -1e-05
+    ],
+    "logmel_mean": -9e-06,
+    "logmel_std": 0.0,
+    "probs": [
+      0.960518,
+      0.0175,
+      0.021981
+    ],
+    "wake_score": 0.039482
+  },
+  "positive_wake_up_neo": {
+    "source": "parler/hold/wake_up_neo/Raghav/000.wav",
+    "text": "Wake up, Neo.",
+    "speaker": "Raghav",
+    "note": "held-out TTS speaker, never trained on",
+    "logmel_mean": 3e-06,
+    "logmel_std": 4.991196,
+    "probs": [
+      0.057201,
+      0.795474,
+      0.147326
+    ],
+    "wake_score": 0.942799,
+    "order_argmax": "wake_up_neo"
+  },
+  "positive_neo_wake_up": {
+    "source": "parler/hold/wake_up_neo/Raghav/001.wav",
+    "text": "Neo, wake up.",
+    "speaker": "Raghav",
+    "note": "held-out TTS speaker, never trained on",
+    "logmel_mean": 4e-06,
+    "logmel_std": 4.939191,
+    "probs": [
+      0.291159,
+      0.144467,
+      0.564374
+    ],
+    "wake_score": 0.708841,
+    "order_argmax": "neo_wake_up"
+  }
+}

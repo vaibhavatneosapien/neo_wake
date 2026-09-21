@@ -1,9 +1,9 @@
-This directory ships two categories of ONNX model, under different licences.
+This directory ships the chorus6 wake-word bundle. Both files are in-house,
+proprietary. All rights reserved.
 
-- neo_sim_sim_cover.onnx
-  In-house, proprietary. All rights reserved.
+- chorus6_frontend.onnx  raw 16 kHz audio [batch,32000] -> log-Mel [batch,200,40]
+                         (AGC v2 + 40-bin log-Mel + per-window mean subtraction)
+- chorus6.onnx           log-Mel [batch,200,40] -> softmax probs [batch,3]
+                         (background, wake_up_neo, neo_wake_up)
 
-- melspectrogram_v1.onnx, embedding_model_v1.onnx
-  Shared feature frontend from openWakeWord v0.5.1
-  (https://github.com/dscripka/openWakeWord), licensed Apache License 2.0
-  (https://github.com/dscripka/openWakeWord/blob/main/LICENSE).
+sha256 values are recorded in the bundle's chorus6.config.json.
