@@ -1,97 +1,82 @@
 package xyz.neosapien.neo_wake
 
-import ai.onnxruntime.OnnxTensor
-import ai.onnxruntime.OrtEnvironment
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import org.junit.Assert.assertArrayEquals
+import org.json.JSONObject
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
-import java.nio.FloatBuffer
 
 /**
- * U2 native session-layer tests for [NeoWakeSessions].
+ * Device-gated session + hook tests for the chorus6 graphs.
  *
- * DEVICE-GATED: instrumented (`connectedAndroidTest`), not a plain JVM unit
- * test — `OrtEnvironment`/`OrtSession` load ORT's native `.so`, which is only
- * present on a real Android device/emulator classloader. This was written
- * but NOT run in this environment (no emulator available); see the U2 task's
- * verification notes.
+ * Instrumented (`connectedAndroidTest`), not a plain JVM unit test —
+ * `OrtEnvironment`/`OrtSession` load ORT's native `.so`, which is only
+ * present on a real Android device/emulator classloader. The bundle's
+ * reference audio ships as androidTest assets (`wakeword/*.wav`,
+ * `reference_vectors.json`) and is read through the TEST apk's context.
  */
 @RunWith(AndroidJUnit4::class)
 class NeoWakeSessionsInstrumentedTest {
+    private val targetContext get() = InstrumentationRegistry.getInstrumentation().targetContext
+    private val testContext get() = InstrumentationRegistry.getInstrumentation().context
+
     @Test
     fun ensureInitialized_isIdempotent() {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
-        NeoWakeSessions.ensureInitialized(context)
-        val melAfterFirst = NeoWakeSessions.session(NeoWakeSessions.Graph.MELSPECTROGRAM)
-        NeoWakeSessions.ensureInitialized(context)
-        val melAfterSecond = NeoWakeSessions.session(NeoWakeSessions.Graph.MELSPECTROGRAM)
+        NeoWakeSessions.ensureInitialized(targetContext)
+        val first = NeoWakeSessions.session(NeoWakeSessions.Graph.FRONTEND)
+        NeoWakeSessions.ensureInitialized(targetContext)
+        val second = NeoWakeSessions.session(NeoWakeSessions.Graph.FRONTEND)
 
-        assertNotNull(melAfterFirst)
-        assertSame("second ensureInitialized() must not recreate the session", melAfterFirst, melAfterSecond)
+        assertNotNull(first)
+        assertSame("second ensureInitialized() must not recreate the session", first, second)
+        assertNotNull(NeoWakeSessions.session(NeoWakeSessions.Graph.BODY))
     }
 
     @Test
-    fun melspectrogramSession_dummyInput_returnsExpectedOutputRank() {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
-        NeoWakeSessions.ensureInitialized(context)
-        val session = NeoWakeSessions.session(NeoWakeSessions.Graph.MELSPECTROGRAM)
-        assertNotNull("melspectrogram session not created", session)
+    fun frontendHook_returnsExactly8000Floats() {
+        NeoWakeSessions.ensureInitialized(targetContext)
+        val logmel = NeoWakeOrtHooks.frontendHook()(FloatArray(WakeSpotter.WINDOW_SAMPLES))
+        assertEquals(WakeSpotter.LOGMEL_FLOATS, logmel.size)
+    }
 
-        // OrtEnvironment.getEnvironment() is a process-wide singleton shared
-        // with NeoWakeSessions itself — do not close it here.
-        val env = OrtEnvironment.getEnvironment()
-        // Model input: [batch_size, samples] float32. 1280 samples = one
-        // 80ms/16kHz advance (plan R1).
-        val samples = FloatArray(1280)
-        OnnxTensor.createTensor(env, FloatBuffer.wrap(samples), longArrayOf(1, 1280)).use { input ->
-            session!!.run(mapOf("input" to input)).use { result ->
-                val output = result[0] as OnnxTensor
-                val shape = output.info.shape
-                // [time, 1, ?, 32] — last dim is the fixed mel-bin count.
-                assertTrue(shape.size == 4)
-                assertTrue(shape.last() == 32L)
-            }
+    @Test
+    fun bodyHook_rowsSumToOne_softmaxIsInGraph() {
+        NeoWakeSessions.ensureInitialized(targetContext)
+        val logmel = NeoWakeOrtHooks.frontendHook()(FloatArray(WakeSpotter.WINDOW_SAMPLES))
+        val probs = NeoWakeOrtHooks.bodyHook()(logmel)
+        assertEquals(WakeSpotter.CLASS_COUNT, probs.size)
+        assertEquals(1.0, probs.sumOf { it.toDouble() }, 1e-3)
+    }
+
+    @Test
+    fun referenceInputs_reproduceTheBundlesWakeScores() {
+        NeoWakeSessions.ensureInitialized(targetContext)
+        val reference = JSONObject(testContext.assets.open("wakeword/reference_vectors.json").bufferedReader().readText())
+        val frontend = NeoWakeOrtHooks.frontendHook()
+        val body = NeoWakeOrtHooks.bodyHook()
+        for (name in listOf("positive_wake_up_neo", "positive_neo_wake_up", "burst_-30dBFS", "burst_-45dBFS")) {
+            val audio = WakeTestAudio.loadWav(testContext, "wakeword/$name.wav")
+            val probs = body(frontend(audio))
+            val wake = probs[1].toDouble() + probs[2].toDouble()
+            assertEquals(name, reference.getJSONObject(name).getDouble("wake_score"), wake, 0.01)
         }
+        val silence = body(frontend(FloatArray(WakeSpotter.WINDOW_SAMPLES)))
+        assertEquals("silence", reference.getJSONObject("silence").getDouble("wake_score"), silence[1].toDouble() + silence[2].toDouble(), 0.01)
     }
 
     @Test
-    fun embeddingSession_dummyInput_returnsExpectedOutputShape() {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
-        NeoWakeSessions.ensureInitialized(context)
-        val session = NeoWakeSessions.session(NeoWakeSessions.Graph.EMBEDDING)
-        assertNotNull("embedding session not created", session)
-
-        val env = OrtEnvironment.getEnvironment()
-        // Model input: [batch, 76, 32, 1] float32 mel frames.
-        val samples = FloatArray(1 * 76 * 32 * 1)
-        OnnxTensor.createTensor(env, FloatBuffer.wrap(samples), longArrayOf(1, 76, 32, 1)).use { input ->
-            session!!.run(mapOf("input_1" to input)).use { result ->
-                val output = result[0] as OnnxTensor
-                assertArrayEquals(longArrayOf(1, 1, 1, 96), output.info.shape)
-            }
-        }
-    }
-
-    @Test
-    fun classifierSession_dummyInput_returnsExpectedOutputShape() {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
-        NeoWakeSessions.ensureInitialized(context)
-        val session = NeoWakeSessions.session(NeoWakeSessions.Graph.CLASSIFIER)
-        assertNotNull("classifier session not created", session)
-
-        val env = OrtEnvironment.getEnvironment()
-        // Model input: [batch, 16, 96] float32 stacked embeddings.
-        val samples = FloatArray(1 * 16 * 96)
-        OnnxTensor.createTensor(env, FloatBuffer.wrap(samples), longArrayOf(1, 16, 96)).use { input ->
-            session!!.run(mapOf("onnx::Flatten_0" to input)).use { result ->
-                val output = result[0] as OnnxTensor
-                assertArrayEquals(longArrayOf(1, 1), output.info.shape)
-            }
+    fun frontendHook_rejectsAWrongLengthInput() {
+        NeoWakeSessions.ensureInitialized(targetContext)
+        try {
+            NeoWakeOrtHooks.frontendHook()(FloatArray(1760))
+            fail("a 1760-sample input must throw, never score")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("32000"))
         }
     }
 

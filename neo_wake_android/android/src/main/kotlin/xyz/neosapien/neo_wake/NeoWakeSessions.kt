@@ -7,24 +7,26 @@ import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Process-scoped holder for the three ONNX Runtime sessions the wake-word
- * pipeline runs (melspectrogram, embedding, classifier).
+ * Process-scoped holder for the two ONNX Runtime sessions the chorus6
+ * wake-word pipeline runs: the frontend (raw 2 s audio -> log-Mel, AGC v2
+ * inside) and the body (log-Mel -> 3-class softmax).
  *
- * U2 is ONLY the session layer: create the environment once, create one
- * session per bundled graph once, and hand sessions back out for reuse. No
- * audio decode and no mel/embed/classify state machine here — that is U3.
+ * ONLY the session layer: create the environment once, create one session
+ * per bundled graph once, and hand sessions back out for reuse. No audio
+ * decode and no decision logic here — that is [WakeSpotter].
  *
  * Low-power session config (plan R6): a single intra-op thread, intra- AND
  * inter-op thread spinning explicitly disabled, sequential execution mode,
  * and the CPU execution provider only (no NNAPI/CoreML providers added).
  */
 object NeoWakeSessions {
-    /** Graph names, named for the bundled model files under assets/wakeword. */
+    /** Graph names, named for the bundled model files under assets/wakeword.
+     * New filenames on every model swap — the runtime cache below is keyed
+     * on the name, so a same-named retrain would keep the old weights (see
+     * docs/solutions onnx-wake-chain-silent-frontend-bugs-score-confidently). */
     enum class Graph(val fileName: String) {
-        MELSPECTROGRAM("melspectrogram_v1"),
-        EMBEDDING("embedding_model_v1"),
-        // KTD7: keep the version-templated classifier name.
-        CLASSIFIER("neo_sim_sim_cover"),
+        FRONTEND("chorus6_frontend"),
+        BODY("chorus6"),
     }
 
     private val lock = Any()
@@ -32,9 +34,9 @@ object NeoWakeSessions {
     private val sessions = ConcurrentHashMap<String, OrtSession>()
 
     /**
-     * Creates the ORT environment and the three graph sessions if they do
-     * not already exist. Idempotent: a second call is a no-op for any graph
-     * that already has a live session.
+     * Creates the ORT environment and the two graph sessions if they do not
+     * already exist. Idempotent: a second call is a no-op for any graph that
+     * already has a live session.
      */
     fun ensureInitialized(context: Context) {
         synchronized(lock) {

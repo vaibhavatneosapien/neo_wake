@@ -120,36 +120,18 @@ public final class WakeCodecPipeline {
         spotter.onFrameDropped()
     }
 
-    // Post-fire cooldown (mirrors the Dart service's _kLockoutMs). Without it
-    // the embedding ring keeps scoring the same "Neo SimSim" every 80 ms step
-    // for ~1.3 s, so one spoken wake word fires dozens of times. On a real fire
-    // we clear the ring (onDetection) AND suppress further fires for the lockout
-    // window, so a single utterance = a single fire and the open/close toggle
-    // stays sane.
-    private var lockoutUntilMs: Double = 0
-    private static let lockoutMs: Double = 1500
-
+    // No post-fire cooldown here: the chorus6 `WakeSpotter` owns the whole
+    // gate (two-hop confirm, hysteresis re-arm, ring reset on fire), so one
+    // spoken phrase is one fired step by construction. The capture layer's
+    // own repeat-debounce (`WakeCommandCapture`) is the only timer left, and
+    // it guards the open/close toggle, not detection.
     private func feedEngine(_ samples: [Int16]) throws -> [WakeSpotterStep] {
         var results: [WakeSpotterStep] = []
         var thrown: Error?
         framer.add(samples) { frame in
             guard thrown == nil else { return }
             do {
-                let step = try spotter.process(frame)
-                if step.fired {
-                    let now = Date().timeIntervalSince1970 * 1000
-                    if now < lockoutUntilMs {
-                        // Within the cooldown — a re-fire on the still-decaying
-                        // ring. Surface the step but not as a fire.
-                        results.append(WakeSpotterStep(stepIndex: step.stepIndex, score: step.score, fired: false))
-                    } else {
-                        results.append(step)
-                        spotter.onDetection() // clear the ring so the same word can't re-fire
-                        lockoutUntilMs = now + WakeCodecPipeline.lockoutMs
-                    }
-                } else {
-                    results.append(step)
-                }
+                results.append(try spotter.process(frame))
             } catch {
                 thrown = error
             }

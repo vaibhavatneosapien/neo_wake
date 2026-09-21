@@ -202,9 +202,8 @@ public enum NeoWakeAttach {
 
         let newSpotter = WakeSpotter(
             threshold: record.threshold,
-            mel: NeoWakeOrtHooks.melHook(),
-            embed: NeoWakeOrtHooks.embedHook(),
-            classify: NeoWakeOrtHooks.classifyHook()
+            frontend: NeoWakeOrtHooks.frontendHook(),
+            body: NeoWakeOrtHooks.bodyHook()
         )
         let newPipeline = WakeCodecPipeline(
             spotter: newSpotter,

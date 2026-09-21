@@ -240,9 +240,8 @@ object NeoWakeAttach {
 
         val newSpotter = WakeSpotter(
             threshold = record.threshold,
-            mel = NeoWakeOrtHooks.melHook(),
-            embed = NeoWakeOrtHooks.embedHook(),
-            classify = NeoWakeOrtHooks.classifyHook(),
+            frontend = NeoWakeOrtHooks.frontendHook(),
+            body = NeoWakeOrtHooks.bodyHook(),
         )
         val newPipeline = WakeCodecPipeline(
             spotter = newSpotter,

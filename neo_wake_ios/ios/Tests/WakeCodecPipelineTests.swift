@@ -42,22 +42,27 @@ private func opusFragment(headerLen: Int, marker: UInt8, value: UInt8, seq: Int 
     return frame
 }
 
-private func recordingHooks() -> (mel: MelHook, embed: EmbedHook, classify: ClassifyHook, melInputs: () -> [[Float]]) {
-    final class Box { var melInputs: [[Float]] = [] }
+private let kBackground: [Float] = [0.96, 0.02, 0.02]
+private let kHigh: [Float] = [0.1, 0.5, 0.4] // sum 0.9
+private let kRingTail = WakeSpotter.windowSamples - WakeSpotter.advanceSamples
+private let kScale10: Float = 10.0 / 32768.0
+private let kScale42: Float = 42.0 / 32768.0
+
+private func recordingHooks(probs: [Float] = kBackground) -> (frontend: FrontendHook, body: BodyHook, frontendInputs: () -> [[Float]]) {
+    final class Box { var inputs: [[Float]] = [] }
     let box = Box()
-    let mel: MelHook = { audio in
-        box.melInputs.append(audio)
-        return [Float](repeating: 0, count: WakeSpotter.melFramesPerStep * WakeSpotter.melBinCount)
+    let frontend: FrontendHook = { audio in
+        box.inputs.append(audio)
+        return [Float](repeating: 0, count: WakeSpotter.logmelFloats)
     }
-    let embed: EmbedHook = { _, _ in [Float](repeating: 1, count: WakeSpotter.embeddingDim) }
-    let classify: ClassifyHook = { _, _ in 0.0 }
-    return (mel, embed, classify, { box.melInputs })
+    let body: BodyHook = { _ in probs }
+    return (frontend, body, { box.inputs })
 }
 
 final class WakeCodecPipelineTests: XCTestCase {
     func testCorrectOffset_decodesAndCarriesOverlapThroughThePipeline() throws {
-        let (mel, embed, classify, melInputs) = recordingHooks()
-        let spotter = WakeSpotter(threshold: 0.9, mel: mel, embed: embed, classify: classify)
+        let (frontend, body, frontendInputs) = recordingHooks()
+        let spotter = WakeSpotter(threshold: 0.9, frontend: frontend, body: body)
         let fake = FakeOpusDecoder()
         let pipeline = WakeCodecPipeline(
             spotter: spotter, codec: .opus, samplesPerFrame: 160,
@@ -76,17 +81,18 @@ final class WakeCodecPipelineTests: XCTestCase {
             }
         }
 
-        // First WakeSpotter step: overlap is zero-padded (KTD4 R3), advance
-        // is all-10s (160 samples * 8 fragments, each fake-decoded to value 10).
-        let audio = melInputs()[0]
-        XCTAssertEqual(audio.count, WakeSpotter.melInputSamples)
-        XCTAssertTrue(audio[0..<WakeSpotter.overlapSamples].allSatisfy { $0 == 0.0 })
-        XCTAssertTrue(audio[WakeSpotter.overlapSamples...].allSatisfy { $0 == 10.0 })
+        // First WakeSpotter step: the ring is zero except the newest advance,
+        // all-10s scaled by 1/32768 (160 samples * 8 fragments, each
+        // fake-decoded to value 10).
+        let audio = frontendInputs()[0]
+        XCTAssertEqual(audio.count, WakeSpotter.windowSamples)
+        XCTAssertTrue(audio[0..<kRingTail].allSatisfy { $0 == 0.0 })
+        XCTAssertTrue(audio[kRingTail...].allSatisfy { $0 == kScale10 })
     }
 
     func testWrongHeaderOffset_neverDecodes_neverFires() throws {
-        let (mel, embed, classify, _) = recordingHooks()
-        let spotter = WakeSpotter(threshold: 0.0, mel: mel, embed: embed, classify: classify) // threshold 0 -> any score fires
+        let (frontend, body, _) = recordingHooks()
+        let spotter = WakeSpotter(threshold: 0.0, frontend: frontend, body: body) // threshold 0 -> any score fires
         let fake = FakeOpusDecoder()
         // Frames are framed for a 4-byte header, but the pipeline is told 3.
         let pipeline = WakeCodecPipeline(
@@ -109,8 +115,8 @@ final class WakeCodecPipelineTests: XCTestCase {
     }
 
     func testHeaderProbe_pick4ByteOffset_thenDecodesSteadyState() throws {
-        let (mel, embed, classify, _) = recordingHooks()
-        let spotter = WakeSpotter(threshold: 0.9, mel: mel, embed: embed, classify: classify)
+        let (frontend, body, _) = recordingHooks()
+        let spotter = WakeSpotter(threshold: 0.9, frontend: frontend, body: body)
         let fake = FakeOpusDecoder()
         // headerLenOverride 0 => probe at runtime, same as
         // `_kHeaderLenOverride == 0` in the Dart service.
@@ -131,19 +137,13 @@ final class WakeCodecPipelineTests: XCTestCase {
         XCTAssertTrue(steps.isEmpty) // just one more fragment, not yet a full 1280-sample advance
     }
 
-    func testDroppedFrame_onDecodeFailure_resetsEmbeddingRingOnly() throws {
-        // Mirrors wake_word_service_test.dart's EngineFrameQueue overflow
-        // scenario, but the discontinuity source here is a decode failure
-        // rather than a queue eviction -- same `onFrameDropped()` contract.
-        let mel: MelHook = { _ in [Float](repeating: 0, count: WakeSpotter.melFramesPerStep * WakeSpotter.melBinCount) }
-        let embed: EmbedHook = { _, _ in [Float](repeating: 0, count: WakeSpotter.embeddingDim) }
-        let classify: ClassifyHook = { _, _ in 0.0 }
-        let spotter = WakeSpotter(threshold: 0.5, mel: mel, embed: embed, classify: classify)
+    func testDroppedFrame_onDecodeFailure_zeroesTheRingAndDoesNotFire() throws {
+        let (frontend, body, frontendInputs) = recordingHooks()
+        let spotter = WakeSpotter(threshold: 0.5, frontend: frontend, body: body)
         for _ in 0..<40 {
-            try spotter.process([Int16](repeating: 0, count: WakeSpotter.advanceSamples))
+            try spotter.process([Int16](repeating: 16384, count: WakeSpotter.advanceSamples))
         }
-        XCTAssertEqual(spotter.embeddingRingLength, WakeSpotter.embeddingRingDepth, "ring must be genuinely full first")
-        let melBufferBefore = spotter.melBufferLength
+        XCTAssertTrue(frontendInputs().last!.allSatisfy { $0 == 0.5 })
 
         let fake = FakeOpusDecoder()
         let pipeline = WakeCodecPipeline(
@@ -151,16 +151,38 @@ final class WakeCodecPipelineTests: XCTestCase {
             headerLenOverride: 3, decoderFactory: { fake }
         )
         // Wrong marker -> guaranteed decode failure -> breakStream().
-        _ = try pipeline.onFragment(opusFragment(headerLen: 3, marker: 0xFF, value: 1))
+        let steps = try pipeline.onFragment(opusFragment(headerLen: 3, marker: 0xFF, value: 1))
 
-        XCTAssertEqual(spotter.embeddingRingLength, 0, "a drop clears the ring, not the mel buffer (R6/R18)")
-        XCTAssertEqual(spotter.melBufferLength, melBufferBefore, "mel/raw overlap survive a drop untouched")
+        XCTAssertTrue(steps.isEmpty)
         XCTAssertEqual(pipeline.decodeFailed, 1)
+        // The next real advance sees only itself: everything older was zeroed.
+        try spotter.process([Int16](repeating: 16384, count: WakeSpotter.advanceSamples))
+        let audio = frontendInputs().last!
+        XCTAssertTrue(audio[0..<kRingTail].allSatisfy { $0 == 0.0 })
+        XCTAssertTrue(audio[kRingTail...].allSatisfy { $0 == 0.5 })
+    }
+
+    func testTwoConsecutiveOverThresholdHops_fireOnce_thirdDoesNot_throughThePipeline() throws {
+        let (frontend, body, _) = recordingHooks(probs: kHigh)
+        let spotter = WakeSpotter(threshold: 0.45, frontend: frontend, body: body)
+        let fake = FakeOpusDecoder()
+        let pipeline = WakeCodecPipeline(
+            spotter: spotter, codec: .opus, samplesPerFrame: 160,
+            headerLenOverride: 3, decoderFactory: { fake }
+        )
+
+        var fired: [Int] = []
+        for i in 0..<24 { // 3 advances
+            let steps = try pipeline.onFragment(opusFragment(headerLen: 3, marker: 0xAB, value: 10, seq: i))
+            fired.append(contentsOf: steps.filter { $0.fired }.map { $0.stepIndex })
+        }
+
+        XCTAssertEqual(fired, [1], "hysteresis, not a clock: one fire on the second hop, none on the third")
     }
 
     func testPcm8Path_decodesWithoutOpus() throws {
-        let (mel, embed, classify, melInputs) = recordingHooks()
-        let spotter = WakeSpotter(threshold: 0.9, mel: mel, embed: embed, classify: classify)
+        let (frontend, body, frontendInputs) = recordingHooks()
+        let spotter = WakeSpotter(threshold: 0.9, frontend: frontend, body: body)
         let fake = FakeOpusDecoder() // must never be called on the pcm8 path
         let pipeline = WakeCodecPipeline(
             spotter: spotter, codec: .pcm8, samplesPerFrame: 160,
@@ -180,19 +202,18 @@ final class WakeCodecPipelineTests: XCTestCase {
         }
 
         XCTAssertEqual(fake.decodeCalls, 0, "pcm8 must never reach the Opus decoder")
-        let audio = melInputs()[0]
-        XCTAssertTrue(audio[WakeSpotter.overlapSamples...].allSatisfy { $0 == 42.0 })
+        let audio = frontendInputs()[0]
+        XCTAssertTrue(audio[kRingTail...].allSatisfy { $0 == kScale42 })
     }
 
-    func testNeutralInput_neverFiresBeforeRingIsGenuinelyFull() throws {
+    func testNeutralInput_neverFires() throws {
         // A structural guard, not a numeric one: with neutral fake hooks
-        // (classify pinned below any real threshold) unrelated/incomplete
-        // input never synthesizes a fire out of pipeline wiring alone.
-        // Proving the REAL graph resists off-distribution input (the
-        // documented confident-positive failure mode) needs the real ONNX
-        // weights -- that is the U4 golden-corpus gate, device/emulator-only.
-        let (mel, embed, classify, _) = recordingHooks()
-        let spotter = WakeSpotter(threshold: 0.99, mel: mel, embed: embed, classify: classify)
+        // (body pinned at background) unrelated input never synthesizes a
+        // fire out of pipeline wiring alone. Proving the REAL graph resists
+        // off-distribution input needs the real ONNX weights -- that is the
+        // device-gated section of WakeSpotterGoldenTest.
+        let (frontend, body, _) = recordingHooks()
+        let spotter = WakeSpotter(threshold: 0.99, frontend: frontend, body: body)
         let fake = FakeOpusDecoder()
         let pipeline = WakeCodecPipeline(
             spotter: spotter, codec: .opus, samplesPerFrame: 160,

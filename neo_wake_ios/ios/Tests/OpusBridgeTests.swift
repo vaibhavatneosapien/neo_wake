@@ -54,10 +54,9 @@ final class OpusBridgeTests: XCTestCase {
         var frame: [UInt8] = [0, 0, 0] // 3-byte BLE header
         frame.append(contentsOf: Self.kFixedTonePayload)
 
-        let mel: MelHook = { _ in [Float](repeating: 0, count: WakeSpotter.melFramesPerStep * WakeSpotter.melBinCount) }
-        let embed: EmbedHook = { _, _ in [Float](repeating: 0, count: WakeSpotter.embeddingDim) }
-        let classify: ClassifyHook = { _, _ in 0.0 }
-        let spotter = WakeSpotter(threshold: 0.9, mel: mel, embed: embed, classify: classify)
+        let frontend: FrontendHook = { _ in [Float](repeating: 0, count: WakeSpotter.logmelFloats) }
+        let body: BodyHook = { _ in [0.96, 0.02, 0.02] }
+        let spotter = WakeSpotter(threshold: 0.9, frontend: frontend, body: body)
         let pipeline = WakeCodecPipeline(
             spotter: spotter, codec: .opus, samplesPerFrame: 320,
             headerLenOverride: 3, decoderFactory: { NeoOpusDecoder(sampleRate: 16000, channels: 1)! }

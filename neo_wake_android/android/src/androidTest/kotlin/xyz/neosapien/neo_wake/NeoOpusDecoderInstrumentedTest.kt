@@ -61,10 +61,9 @@ class NeoOpusDecoderInstrumentedTest {
     @Test
     fun pipeline_withRealDecoder_decodesOneFragment() {
         val frame = byteArrayOf(0, 0, 0) + kFixedTonePayload // 3-byte BLE header
-        val mel: MelHook = { FloatArray(WakeSpotter.MEL_FRAMES_PER_STEP * WakeSpotter.MEL_BIN_COUNT) }
-        val embed: EmbedHook = { _, _ -> FloatArray(WakeSpotter.EMBEDDING_DIM) }
-        val classify: ClassifyHook = { _, _ -> 0.0 }
-        val spotter = WakeSpotter(0.9, mel, embed, classify)
+        val frontend: FrontendHook = { FloatArray(WakeSpotter.LOGMEL_FLOATS) }
+        val body: BodyHook = { floatArrayOf(0.96f, 0.02f, 0.02f) }
+        val spotter = WakeSpotter(0.9, frontend, body)
         val pipeline = WakeCodecPipeline(
             spotter = spotter, codec = NeoWakeAudioCodec.OPUS, samplesPerFrame = 320,
             headerLenOverride = 3, decoderFactory = { NeoOpusDecoder.create(16000, 1)!! }

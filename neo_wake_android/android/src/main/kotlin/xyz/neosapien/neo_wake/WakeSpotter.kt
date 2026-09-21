@@ -1,49 +1,46 @@
 package xyz.neosapien.neo_wake
 
 /**
- * The pure ONNX streaming chain for "Neo Simsim" detection (KTD3/KTD4).
+ * The streaming chorus6 detector for "wake up neo" / "neo wake up".
  *
- * 1:1 port of `lib/core/neo_agent/wake_spotter.dart` — see that file's header
- * for the full rationale. Every stride here is arithmetic with one correct
- * answer, not a tunable:
- *   - 1280-sample (80 ms) advance, fed with the preceding 480 samples of
- *     overlap, so the mel model sees 1760 samples and yields the 8 frames an
- *     80 ms advance represents. Feed it 1280 alone and it yields 5 frames,
- *     silently dropping 37% of the mel timeline.
- *   - `(v / 10) + 2` on every mel value as it enters the mel buffer, at
- *     exactly one place. Omit it and scores stay near zero with no error
- *     anywhere.
- *   - The classifier only ever sees a genuinely full 16-embedding ring. A
- *     half-zeroed ring of otherwise real embeddings scores confidently
- *     positive, not near zero.
+ * Every constant here is arithmetic from `chorus6.config.json`, not a
+ * tunable — except [threshold], the one runtime value pushed on `arm`:
+ *   - a 2.0 s ring of 32000 float samples, int16 scaled by 1/32768. The
+ *     model was trained on `[-1, 1]` audio; feeding raw int16 magnitudes
+ *     saturates the frontend's AGC and scores near zero with no error.
+ *   - 1280-sample (80 ms) advances. Every hop the whole ring goes through
+ *     the frontend graph (raw audio -> 200x40 log-Mel, AGC v2 inside) and the
+ *     body graph (log-Mel -> 3 softmax probabilities).
+ *   - score = probs[1] + probs[2]: the two phrase orders compete with
+ *     background, not with each other, so either class alone under-reads a
+ *     real saying. The argmax between them is NOT used anywhere (71.7%
+ *     accurate per the bundle).
+ *   - fire = two consecutive hops at or over [threshold] while armed;
+ *     disarm on fire; re-arm when a later score drops below
+ *     [RELEASE_FRACTION] x threshold. Hysteresis, never a wall-clock timer —
+ *     a timer produced a 21-fire rampage in the bundle's own testing.
+ *   - [resetRing] on every fire: everything in the ring is consumed audio, so
+ *     zeroing it is the bundle's "wipe history" with no index bookkeeping,
+ *     and the next hop scores background (~0.04), which re-arms on its own.
  *
- * TWO RESET SCOPES, NOT ONE — see wake_spotter.dart's header for why.
- * [onDetection]/[onFrameDropped] clear the embedding ring only; mel and raw
- * overlap keep running. [reset] clears all three, for a disconnect, an idle
- * stream, or a disarm.
+ * Reset scopes: a fire zeroes the ring and disarms; a dropped fragment
+ * ([onFrameDropped]) zeroes the ring but leaves `armed` alone — a
+ * discontinuity is never spliced into the 2 s window; [reset] is the full
+ * disconnect/disarm reset.
  *
- * Not reentrant: [process] assumes its caller pumps steps serially (mirrors
- * the Dart class exactly, including that assumption).
+ * Not reentrant: [process] assumes its caller pumps steps serially.
  *
- * The three ONNX calls are injected hooks, same as the Dart original, so
- * this file has zero ORT/plugin dependency and is exercised by a plain JVM
- * JUnit test with fake hooks standing in for the three sessions — the real
- * sessions ([NeoWakeSessions], U2) are wired in by the codec pipeline, not
- * here.
+ * The two ONNX calls are injected hooks, so this file has zero ORT/plugin
+ * dependency and is exercised by a plain JVM JUnit test with fakes standing
+ * in for the sessions — the real hooks ([NeoWakeOrtHooks]) are wired in by
+ * [NeoWakeAttach], not here.
  */
 
-/** Turns one step's 1760-sample audio window into this step's 8 raw mel
- * frames (256 floats, row-major `[frame][bin]`). Unscaled — `(v / 10) + 2`
- * is applied by [WakeSpotter], not the hook. */
-typealias MelHook = (FloatArray) -> FloatArray
+/** Turns the 32000-float audio window into 8000 log-Mel floats (row-major `[frame][bin]`). */
+typealias FrontendHook = (FloatArray) -> FloatArray
 
-/** Turns the mel buffer, flattened to `shape` (`[1, 76, 32, 1]`), into one
- * 96-float embedding. */
-typealias EmbedHook = (FloatArray, List<Int>) -> FloatArray
-
-/** Turns the embedding ring, flattened to `shape` (`[1, 16, 96]`), into one
- * score. The sigmoid is already baked into the graph. */
-typealias ClassifyHook = (FloatArray, List<Int>) -> Double
+/** Turns the 8000 log-Mel floats into the 3 class probabilities (softmax already applied). */
+typealias BodyHook = (FloatArray) -> FloatArray
 
 /** One step's result, returned on every call to [WakeSpotter.process], not
  * only on a detection — the caller owns logging and this stays a pure
@@ -51,73 +48,70 @@ typealias ClassifyHook = (FloatArray, List<Int>) -> Double
 data class WakeSpotterStep(
     /** Counts calls to [WakeSpotter.process] since construction or the last [WakeSpotter.reset]. */
     val stepIndex: Int,
-    /** Null while warming: no score exists until the ring holds 16 real embeddings. */
+    /** `probs[1] + probs[2]` for this hop. Nullable only for API stability with
+     * callers that log `score ?: 0.0`; the chorus6 chain scores every hop. */
     val score: Double?,
-    /** `score != null && score >= threshold`. */
+    /** True on the hop that fires (see the file header for the gate). */
     val fired: Boolean,
 )
 
 /** The streaming detector. Construct one per arm; a pendant reconnect means
  * a new arm. */
 class WakeSpotter(
-    /** Fires at scores `>= threshold`. Required, with no default. */
+    /** Fires at scores `>= threshold` (two hops in a row). Required, with no default. */
     val threshold: Double,
-    private val mel: MelHook,
-    private val embed: EmbedHook,
-    private val classify: ClassifyHook,
+    private val frontend: FrontendHook,
+    private val body: BodyHook,
 ) {
     companion object {
         // Geometry, exposed so the codec pipeline reads it rather than
         // duplicating it — the framer's frame length is built from
         // ADVANCE_SAMPLES.
         const val ADVANCE_SAMPLES = 1280 // 80 ms @ 16 kHz
-        const val OVERLAP_SAMPLES = 480
-        const val MEL_INPUT_SAMPLES = ADVANCE_SAMPLES + OVERLAP_SAMPLES // 1760
-        const val MEL_FRAMES_PER_STEP = 8
-        const val MEL_BIN_COUNT = 32
-        const val MEL_BUFFER_FRAMES = 76
-        const val EMBEDDING_DIM = 96
-        const val EMBEDDING_RING_DEPTH = 16
+        const val WINDOW_SAMPLES = 32000 // 2.0 s @ 16 kHz
+        const val LOGMEL_FRAMES = 200
+        const val LOGMEL_BINS = 40
+        const val LOGMEL_FLOATS = LOGMEL_FRAMES * LOGMEL_BINS
+        const val CLASS_COUNT = 3
+        const val RELEASE_FRACTION = 0.55
+        const val CONSECUTIVE_HOPS = 2
+        const val INT16_SCALE = 1.0f / 32768.0f
     }
 
-    // The 480 samples immediately behind the next advance. Zero at
-    // construction and after reset() — that zero-fill IS the first-step
-    // padding, not a special case handled separately in process().
-    private var rawOverlap = FloatArray(OVERLAP_SAMPLES)
+    /** Re-arm level: `RELEASE_FRACTION * threshold`. */
+    val release: Double = RELEASE_FRACTION * threshold
 
-    // Starts EMPTY, unlike a pre-seeded window: the first embedding must not
-    // run until 76 REAL mel frames exist (~800 ms).
-    private val melBuffer = ArrayDeque<FloatArray>()
+    // Zero at construction and after every reset — zeros ARE the
+    // "no audio yet" state the frontend's AGC maps to background.
+    private val ring = FloatArray(WINDOW_SAMPLES)
 
-    // Also starts empty, depth 16, never pre-seeded with zeros: the
-    // classifier must never see a placeholder entry.
-    private val embeddingRing = ArrayDeque<FloatArray>()
-
+    private var armed = true
+    private var run = 0
     private var step = 0
 
-    val melBufferLength: Int get() = melBuffer.size
-    val embeddingRingLength: Int get() = embeddingRing.size
+    /** True unless a fire has happened and no hop has since dropped below [release]. */
+    val isArmed: Boolean get() = armed
 
-    /** Clears the embedding ring only. See the file header for why mel and
-     * raw audio are deliberately left running. */
-    fun onDetection() {
-        embeddingRing.clear()
+    /** Consecutive hops at or over [threshold] so far. */
+    val consecutiveOverThreshold: Int get() = run
+
+    /** Zeroes the ring and the consecutive-hop counter. Leaves `armed` as-is. */
+    private fun resetRing() {
+        ring.fill(0f)
+        run = 0
     }
 
-    /** Clears the embedding ring only, same scope as [onDetection] — a drop
-     * is a discontinuity for the ring, not a reason to blind the whole
-     * chain. Takes no audio: a dropped frame's audio is by definition never
-     * fed to [process]. */
+    /** A discarded fragment (decode failure, short header, worker overflow):
+     * the window would otherwise splice non-adjacent audio, so it restarts
+     * from silence. `armed` is left alone — a drop is not a fire. */
     fun onFrameDropped() {
-        embeddingRing.clear()
+        resetRing()
     }
 
-    /** Clears mel and raw audio too, for a disconnect, a stream going idle,
-     * or a disarm — points where there is no audio continuity to preserve. */
+    /** Full reset for a disconnect, an idle stream, or a disarm. */
     fun reset() {
-        rawOverlap = FloatArray(OVERLAP_SAMPLES)
-        melBuffer.clear()
-        embeddingRing.clear()
+        resetRing()
+        armed = true
         step = 0
     }
 
@@ -127,63 +121,32 @@ class WakeSpotter(
             "WakeSpotter.process expects $ADVANCE_SAMPLES-sample advance, got ${frame.size}"
         }
 
-        // 1. Assemble this step's fixed-shape 1760-sample window: last
-        // step's 480-sample tail ahead of this step's 1280-sample advance.
-        val audioWindow = FloatArray(MEL_INPUT_SAMPLES)
-        rawOverlap.copyInto(audioWindow, 0)
+        // 1. Shift the ring left by one advance and append the new samples,
+        // scaled into [-1, 1].
+        System.arraycopy(ring, ADVANCE_SAMPLES, ring, 0, WINDOW_SAMPLES - ADVANCE_SAMPLES)
+        val tail = WINDOW_SAMPLES - ADVANCE_SAMPLES
         for (i in 0 until ADVANCE_SAMPLES) {
-            audioWindow[OVERLAP_SAMPLES + i] = frame[i].toFloat()
+            ring[tail + i] = frame[i] * INT16_SCALE
         }
 
-        // Carry this step's own tail forward for the NEXT step, before
-        // anything below can throw and leave the overlap stale.
-        val nextOverlap = FloatArray(OVERLAP_SAMPLES)
-        for (i in 0 until OVERLAP_SAMPLES) {
-            nextOverlap[i] = frame[ADVANCE_SAMPLES - OVERLAP_SAMPLES + i].toFloat()
-        }
-        rawOverlap = nextOverlap
+        // 2. Frontend then body on a copy (the hooks may hand the buffer to
+        // ORT, which must never alias the live ring).
+        val probs = body(frontend(ring.copyOf()))
+        check(probs.size == CLASS_COUNT) { "body hook returned ${probs.size} classes, expected $CLASS_COUNT" }
+        val score = probs[1].toDouble() + probs[2].toDouble()
 
-        // 2. Mel: 1760 samples in, 8 frames out, scaled at exactly one place
-        // as they enter the buffer.
-        val rawMel = mel(audioWindow)
-        for (f in 0 until MEL_FRAMES_PER_STEP) {
-            val scaled = FloatArray(MEL_BIN_COUNT)
-            for (b in 0 until MEL_BIN_COUNT) {
-                scaled[b] = rawMel[f * MEL_BIN_COUNT + b] / 10f + 2f
-            }
-            melBuffer.addLast(scaled)
-        }
-        while (melBuffer.size > MEL_BUFFER_FRAMES) melBuffer.removeFirst()
-
-        var score: Double? = null
-
-        // 3. Embed, only once the buffer holds 76 real frames — never a
-        // partial window.
-        if (melBuffer.size == MEL_BUFFER_FRAMES) {
-            val melFlat = FloatArray(MEL_BUFFER_FRAMES * MEL_BIN_COUNT)
-            var i = 0
-            for (frameVals in melBuffer) {
-                frameVals.copyInto(melFlat, i)
-                i += MEL_BIN_COUNT
-            }
-            val embedding = embed(melFlat, listOf(1, MEL_BUFFER_FRAMES, MEL_BIN_COUNT, 1))
-            embeddingRing.addLast(embedding)
-            while (embeddingRing.size > EMBEDDING_RING_DEPTH) embeddingRing.removeFirst()
-
-            // 4. Classify, only once the ring holds 16 real embeddings — the
-            // gate that makes the zero-padding above safe.
-            if (embeddingRing.size == EMBEDDING_RING_DEPTH) {
-                val embFlat = FloatArray(EMBEDDING_RING_DEPTH * EMBEDDING_DIM)
-                var j = 0
-                for (e in embeddingRing) {
-                    e.copyInto(embFlat, j)
-                    j += EMBEDDING_DIM
-                }
-                score = classify(embFlat, listOf(1, EMBEDDING_RING_DEPTH, EMBEDDING_DIM))
-            }
+        // 3. Gate — order matters: re-arm check first so a hop that sits
+        // below release re-arms before it is counted.
+        if (score < release) armed = true
+        run = if (score >= threshold) run + 1 else 0
+        var fired = false
+        if (run >= CONSECUTIVE_HOPS && armed) {
+            fired = true
+            armed = false
+            resetRing()
         }
 
-        val result = WakeSpotterStep(step, score, score != null && score >= threshold)
+        val result = WakeSpotterStep(step, score, fired)
         step++
         return result
     }

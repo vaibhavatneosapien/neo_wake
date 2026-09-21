@@ -6,7 +6,8 @@ import XCTest
   import onnxruntime_objc
 #endif
 
-/// U2 native session-layer tests for `NeoWakeSessions`.
+/// Device-gated session + hook tests for the chorus6 graphs
+/// (`NeoWakeSessions`, `NeoWakeOrtHooks`).
 ///
 /// NOTE: `neo_wake_ios` has no `example/` app yet, so this file is not wired
 /// to a runnable Xcode test target — there is nowhere to host an XCTest
@@ -17,75 +18,51 @@ import XCTest
 final class NeoWakeSessionsTests: XCTestCase {
     func testEnsureInitialized_isIdempotent() throws {
         try NeoWakeSessions.shared.ensureInitialized()
-        let melAfterFirst = NeoWakeSessions.shared.session(for: .melspectrogram)
+        let first = NeoWakeSessions.shared.session(for: .frontend)
         try NeoWakeSessions.shared.ensureInitialized()
-        let melAfterSecond = NeoWakeSessions.shared.session(for: .melspectrogram)
+        let second = NeoWakeSessions.shared.session(for: .frontend)
 
-        XCTAssertNotNil(melAfterFirst)
-        XCTAssertTrue(melAfterFirst === melAfterSecond,
-                       "second ensureInitialized() must not recreate the session")
+        XCTAssertNotNil(first)
+        XCTAssertTrue(first === second, "second ensureInitialized() must not recreate the session")
+        XCTAssertNotNil(NeoWakeSessions.shared.session(for: .body))
     }
 
-    func testMelspectrogramSession_dummyInput_returnsExpectedOutputRank() throws {
+    func testFrontendHook_returnsExactly8000Floats() throws {
         try NeoWakeSessions.shared.ensureInitialized()
-        guard let session = NeoWakeSessions.shared.session(for: .melspectrogram) else {
-            return XCTFail("melspectrogram session not created")
-        }
-        // Model input: [batch_size, samples] float32. 1280 samples = one
-        // 80ms/16kHz advance (plan R1).
-        let samples = [Float](repeating: 0, count: 1280)
-        let inputData = NSMutableData(bytes: samples, length: samples.count * MemoryLayout<Float>.stride)
-        let input = try ORTValue(tensorData: inputData, elementType: .float, shape: [1, 1280])
-
-        let outputs = try session.run(withInputs: ["input": input],
-                                       outputNames: Set(["output"]),
-                                       runOptions: nil)
-        let output = try XCTUnwrap(outputs["output"])
-        let shape = try output.tensorTypeAndShapeInfo().shape.map { Int(truncating: $0) }
-
-        // [time, 1, ?, 32] — last dim is the fixed mel-bin count.
-        XCTAssertEqual(shape.count, 4)
-        XCTAssertEqual(shape.last, 32)
+        let logmel = try NeoWakeOrtHooks.frontendHook()([Float](repeating: 0, count: WakeSpotter.windowSamples))
+        XCTAssertEqual(logmel.count, WakeSpotter.logmelFloats)
     }
 
-    func testEmbeddingSession_dummyInput_returnsExpectedOutputShape() throws {
+    func testBodyHook_rowsSumToOne_softmaxIsInGraph() throws {
         try NeoWakeSessions.shared.ensureInitialized()
-        guard let session = NeoWakeSessions.shared.session(for: .embedding) else {
-            return XCTFail("embedding session not created")
-        }
-        // Model input: [batch, 76, 32, 1] float32 mel frames.
-        let count = 1 * 76 * 32 * 1
-        let samples = [Float](repeating: 0, count: count)
-        let inputData = NSMutableData(bytes: samples, length: samples.count * MemoryLayout<Float>.stride)
-        let input = try ORTValue(tensorData: inputData, elementType: .float, shape: [1, 76, 32, 1])
-
-        let outputs = try session.run(withInputs: ["input_1": input],
-                                       outputNames: Set(["conv2d_19"]),
-                                       runOptions: nil)
-        let output = try XCTUnwrap(outputs["conv2d_19"])
-        let shape = try output.tensorTypeAndShapeInfo().shape.map { Int(truncating: $0) }
-
-        XCTAssertEqual(shape, [1, 1, 1, 96])
+        let logmel = try NeoWakeOrtHooks.frontendHook()([Float](repeating: 0, count: WakeSpotter.windowSamples))
+        let probs = try NeoWakeOrtHooks.bodyHook()(logmel)
+        XCTAssertEqual(probs.count, WakeSpotter.classCount)
+        XCTAssertEqual(probs.reduce(0, +), 1.0, accuracy: 1e-3)
     }
 
-    func testClassifierSession_dummyInput_returnsExpectedOutputShape() throws {
+    func testReferenceInputs_reproduceTheBundlesWakeScores() throws {
         try NeoWakeSessions.shared.ensureInitialized()
-        guard let session = NeoWakeSessions.shared.session(for: .classifier) else {
-            return XCTFail("classifier session not created")
+        let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Fixtures/wakeword")
+        let reference = try JSONSerialization.jsonObject(with: Data(contentsOf: dir.appendingPathComponent("reference_vectors.json"))) as! [String: [String: Any]]
+        let frontend = NeoWakeOrtHooks.frontendHook()
+        let body = NeoWakeOrtHooks.bodyHook()
+        for name in ["positive_wake_up_neo", "positive_neo_wake_up", "burst_-30dBFS", "burst_-45dBFS"] {
+            let data = try Data(contentsOf: dir.appendingPathComponent("\(name).wav"))
+            let pcm = data.dropFirst(44).withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }
+            var audio = [Float](repeating: 0, count: WakeSpotter.windowSamples)
+            for i in 0..<min(pcm.count, audio.count) { audio[i] = Float(Int16(littleEndian: pcm[i])) * WakeSpotter.int16Scale }
+            let probs = try body(try frontend(audio))
+            let expected = (reference[name]!["wake_score"] as! NSNumber).doubleValue
+            XCTAssertEqual(Double(probs[1]) + Double(probs[2]), expected, accuracy: 0.01, name)
         }
-        // Model input: [batch, 16, 96] float32 stacked embeddings.
-        let count = 1 * 16 * 96
-        let samples = [Float](repeating: 0, count: count)
-        let inputData = NSMutableData(bytes: samples, length: samples.count * MemoryLayout<Float>.stride)
-        let input = try ORTValue(tensorData: inputData, elementType: .float, shape: [1, 16, 96])
+        let silence = try body(try frontend([Float](repeating: 0, count: WakeSpotter.windowSamples)))
+        XCTAssertEqual(Double(silence[1]) + Double(silence[2]), (reference["silence"]!["wake_score"] as! NSNumber).doubleValue, accuracy: 0.01)
+    }
 
-        let outputs = try session.run(withInputs: ["onnx::Flatten_0": input],
-                                       outputNames: Set(["output"]),
-                                       runOptions: nil)
-        let output = try XCTUnwrap(outputs["output"])
-        let shape = try output.tensorTypeAndShapeInfo().shape.map { Int(truncating: $0) }
-
-        XCTAssertEqual(shape, [1, 1])
+    func testFrontendHook_rejectsAWrongLengthInput() throws {
+        try NeoWakeSessions.shared.ensureInitialized()
+        XCTAssertThrowsError(try NeoWakeOrtHooks.frontendHook()([Float](repeating: 0, count: 1760)))
     }
 
     func testLowPowerSessionOptions_appliesWithoutThrowing() throws {

@@ -4,12 +4,13 @@ import Foundation
   import onnxruntime_objc
 #endif
 
-/// Process-scoped holder for the three ONNX Runtime sessions the wake-word
-/// pipeline runs (melspectrogram, embedding, classifier).
+/// Process-scoped holder for the two ONNX Runtime sessions the chorus6
+/// wake-word pipeline runs: the frontend (raw 2 s audio -> log-Mel, AGC v2
+/// inside) and the body (log-Mel -> 3-class softmax).
 ///
-/// U2 is ONLY the session layer: create the env once, create one session per
+/// ONLY the session layer: create the env once, create one session per
 /// bundled graph once, and hand sessions back out for reuse. No audio decode
-/// and no mel/embed/classify state machine here — that is U3.
+/// and no decision logic here — that is `WakeSpotter`.
 ///
 /// Low-power session config (plan R6): a single intra-op thread, intra- AND
 /// inter-op thread spinning explicitly disabled, and the CPU execution
@@ -27,11 +28,12 @@ final class NeoWakeSessions {
     static let shared = NeoWakeSessions()
 
     /// Graph names the wake-word pipeline runs, named for the bundled model
-    /// files (KTD7: keep the version-templated classifier name).
+    /// files. New filenames on every model swap — the temp copy below is keyed
+    /// on the name, so a same-named retrain would keep the old weights (see
+    /// docs/solutions onnx-wake-chain-silent-frontend-bugs-score-confidently).
     enum Graph: String, CaseIterable {
-        case melspectrogram = "melspectrogram_v1"
-        case embedding = "embedding_model_v1"
-        case classifier = "neo_sim_sim_cover"
+        case frontend = "chorus6_frontend"
+        case body = "chorus6"
     }
 
     enum NeoWakeSessionsError: Error {
@@ -45,7 +47,7 @@ final class NeoWakeSessions {
 
     private init() {}
 
-    /// Creates the ORT environment and the three graph sessions if they do
+    /// Creates the ORT environment and the two graph sessions if they do
     /// not already exist. Idempotent: a second call is a no-op for any graph
     /// that already has a live session.
     func ensureInitialized() throws {

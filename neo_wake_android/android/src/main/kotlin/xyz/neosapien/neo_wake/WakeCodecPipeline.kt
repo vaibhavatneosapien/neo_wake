@@ -103,38 +103,15 @@ class WakeCodecPipeline(
         spotter.onFrameDropped()
     }
 
-    // Post-fire cooldown (mirrors the Dart service's _kLockoutMs). Without it
-    // the embedding ring keeps scoring the same "Neo SimSim" every 80 ms step
-    // for ~1.3 s, so one spoken wake word fires dozens of times. On a real fire
-    // we clear the ring (onDetection) AND suppress further fires for the lockout
-    // window, so a single utterance = a single fire and the open/close toggle
-    // stays sane.
-    private var lockoutUntilMs = 0L
-
+    // No post-fire cooldown here: the chorus6 WakeSpotter owns the whole
+    // gate (two-hop confirm, hysteresis re-arm, ring reset on fire), so one
+    // spoken phrase is one fired step by construction. The capture layer's
+    // own repeat-debounce (WakeCommandCapture) is the only timer left, and it
+    // guards the open/close toggle, not detection.
     private fun feedEngine(samples: ShortArray): List<WakeSpotterStep> {
         val results = mutableListOf<WakeSpotterStep>()
-        framer.add(samples) { frame ->
-            val step = spotter.process(frame)
-            if (step.fired) {
-                val now = System.currentTimeMillis()
-                if (now < lockoutUntilMs) {
-                    // Within the cooldown — a re-fire on the still-decaying ring.
-                    // Surface the step but not as a fire.
-                    results.add(step.copy(fired = false))
-                } else {
-                    results.add(step)
-                    spotter.onDetection() // clear the ring so the same word can't re-fire
-                    lockoutUntilMs = now + LOCKOUT_MS
-                }
-            } else {
-                results.add(step)
-            }
-        }
+        framer.add(samples) { frame -> results.add(spotter.process(frame)) }
         return results
-    }
-
-    private companion object {
-        const val LOCKOUT_MS = 1500L
     }
 
     /**

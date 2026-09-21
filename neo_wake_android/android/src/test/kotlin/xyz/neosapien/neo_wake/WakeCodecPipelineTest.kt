@@ -40,21 +40,28 @@ private fun opusFragment(headerLen: Int, marker: Byte, value: Int, seq: Int = 0)
     return out.toByteArray()
 }
 
+private val BACKGROUND = floatArrayOf(0.96f, 0.02f, 0.02f)
+private val HIGH = floatArrayOf(0.1f, 0.5f, 0.4f) // sum 0.9
+
 private class RecordingHooks {
-    val melInputs = mutableListOf<FloatArray>()
-    val mel: MelHook = { audio ->
-        melInputs.add(audio)
-        FloatArray(WakeSpotter.MEL_FRAMES_PER_STEP * WakeSpotter.MEL_BIN_COUNT)
+    val frontendInputs = mutableListOf<FloatArray>()
+    var probs: FloatArray = BACKGROUND
+    val frontend: FrontendHook = { audio ->
+        frontendInputs.add(audio)
+        FloatArray(WakeSpotter.LOGMEL_FLOATS)
     }
-    val embed: EmbedHook = { _, _ -> FloatArray(WakeSpotter.EMBEDDING_DIM) { 1f } }
-    val classify: ClassifyHook = { _, _ -> 0.0 }
+    val body: BodyHook = { _ -> probs }
 }
+
+private const val RING_TAIL = WakeSpotter.WINDOW_SAMPLES - WakeSpotter.ADVANCE_SAMPLES
+private const val SCALE_10 = 10f / 32768f
+private const val SCALE_42 = 42f / 32768f
 
 class WakeCodecPipelineTest {
     @Test
     fun `correct offset decodes and carries overlap through the pipeline`() {
         val hooks = RecordingHooks()
-        val spotter = WakeSpotter(0.9, hooks.mel, hooks.embed, hooks.classify)
+        val spotter = WakeSpotter(0.9, hooks.frontend, hooks.body)
         val fake = FakeOpusDecoder()
         val pipeline = WakeCodecPipeline(
             spotter = spotter, codec = NeoWakeAudioCodec.OPUS, samplesPerFrame = 160,
@@ -70,16 +77,16 @@ class WakeCodecPipelineTest {
             }
         }
 
-        val audio = hooks.melInputs[0]
-        assertEquals(WakeSpotter.MEL_INPUT_SAMPLES, audio.size)
-        assertTrue(audio.sliceArray(0 until WakeSpotter.OVERLAP_SAMPLES).all { it == 0.0f })
-        assertTrue(audio.sliceArray(WakeSpotter.OVERLAP_SAMPLES until audio.size).all { it == 10.0f })
+        val audio = hooks.frontendInputs[0]
+        assertEquals(WakeSpotter.WINDOW_SAMPLES, audio.size)
+        assertTrue(audio.sliceArray(0 until RING_TAIL).all { it == 0.0f })
+        assertTrue(audio.sliceArray(RING_TAIL until audio.size).all { it == SCALE_10 })
     }
 
     @Test
     fun `wrong header offset never decodes never fires`() {
         val hooks = RecordingHooks()
-        val spotter = WakeSpotter(0.0, hooks.mel, hooks.embed, hooks.classify)
+        val spotter = WakeSpotter(0.0, hooks.frontend, hooks.body)
         val fake = FakeOpusDecoder()
         val pipeline = WakeCodecPipeline(
             spotter = spotter, codec = NeoWakeAudioCodec.OPUS, samplesPerFrame = 160,
@@ -99,7 +106,7 @@ class WakeCodecPipelineTest {
     @Test
     fun `header probe picks 4-byte offset then decodes steady state`() {
         val hooks = RecordingHooks()
-        val spotter = WakeSpotter(0.9, hooks.mel, hooks.embed, hooks.classify)
+        val spotter = WakeSpotter(0.9, hooks.frontend, hooks.body)
         val fake = FakeOpusDecoder()
         val pipeline = WakeCodecPipeline(
             spotter = spotter, codec = NeoWakeAudioCodec.OPUS, samplesPerFrame = 160,
@@ -118,31 +125,52 @@ class WakeCodecPipelineTest {
     }
 
     @Test
-    fun `dropped frame on decode failure resets embedding ring only`() {
-        val mel: MelHook = { FloatArray(WakeSpotter.MEL_FRAMES_PER_STEP * WakeSpotter.MEL_BIN_COUNT) }
-        val embed: EmbedHook = { _, _ -> FloatArray(WakeSpotter.EMBEDDING_DIM) }
-        val classify: ClassifyHook = { _, _ -> 0.0 }
-        val spotter = WakeSpotter(0.5, mel, embed, classify)
-        repeat(40) { spotter.process(ShortArray(WakeSpotter.ADVANCE_SAMPLES)) }
-        assertEquals(WakeSpotter.EMBEDDING_RING_DEPTH, spotter.embeddingRingLength)
-        val melBufferBefore = spotter.melBufferLength
+    fun `dropped frame on decode failure zeroes the ring and does not fire`() {
+        val hooks = RecordingHooks()
+        val spotter = WakeSpotter(0.5, hooks.frontend, hooks.body)
+        repeat(40) { spotter.process(ShortArray(WakeSpotter.ADVANCE_SAMPLES) { 16384 }) }
+        assertTrue(hooks.frontendInputs.last().all { it == 0.5f })
 
         val fake = FakeOpusDecoder()
         val pipeline = WakeCodecPipeline(
             spotter = spotter, codec = NeoWakeAudioCodec.OPUS, samplesPerFrame = 160,
             headerLenOverride = 3, decoderFactory = { fake }
         )
-        pipeline.onFragment(opusFragment(3, 0xFF.toByte(), 1))
+        val steps = pipeline.onFragment(opusFragment(3, 0xFF.toByte(), 1))
 
-        assertEquals(0, spotter.embeddingRingLength)
-        assertEquals(melBufferBefore, spotter.melBufferLength)
+        assertTrue(steps.isEmpty())
         assertEquals(1, pipeline.decodeFailed)
+        // The next real advance sees only itself: everything older was zeroed.
+        spotter.process(ShortArray(WakeSpotter.ADVANCE_SAMPLES) { 16384 })
+        val audio = hooks.frontendInputs.last()
+        assertTrue(audio.sliceArray(0 until RING_TAIL).all { it == 0.0f })
+        assertTrue(audio.sliceArray(RING_TAIL until audio.size).all { it == 0.5f })
+    }
+
+    @Test
+    fun `two consecutive over-threshold hops fire once and a third does not through the pipeline`() {
+        val hooks = RecordingHooks()
+        hooks.probs = HIGH
+        val spotter = WakeSpotter(0.45, hooks.frontend, hooks.body)
+        val fake = FakeOpusDecoder()
+        val pipeline = WakeCodecPipeline(
+            spotter = spotter, codec = NeoWakeAudioCodec.OPUS, samplesPerFrame = 160,
+            headerLenOverride = 3, decoderFactory = { fake }
+        )
+
+        val fired = mutableListOf<Int>()
+        for (i in 0 until 24) { // 3 advances
+            val steps = pipeline.onFragment(opusFragment(3, 0xAB.toByte(), 10, seq = i))
+            for (s in steps) if (s.fired) fired.add(s.stepIndex)
+        }
+
+        assertEquals("hysteresis, not a clock: one fire on the second hop, none on the third", listOf(1), fired)
     }
 
     @Test
     fun `pcm8 path decodes without opus`() {
         val hooks = RecordingHooks()
-        val spotter = WakeSpotter(0.9, hooks.mel, hooks.embed, hooks.classify)
+        val spotter = WakeSpotter(0.9, hooks.frontend, hooks.body)
         val fake = FakeOpusDecoder()
         val pipeline = WakeCodecPipeline(
             spotter = spotter, codec = NeoWakeAudioCodec.PCM8, samplesPerFrame = 160,
@@ -161,14 +189,14 @@ class WakeCodecPipelineTest {
 
         assertEquals(1, lastSteps.size)
         assertEquals(0, fake.decodeCalls)
-        val audio = hooks.melInputs[0]
-        assertTrue(audio.sliceArray(WakeSpotter.OVERLAP_SAMPLES until audio.size).all { it == 42.0f })
+        val audio = hooks.frontendInputs[0]
+        assertTrue(audio.sliceArray(RING_TAIL until audio.size).all { it == SCALE_42 })
     }
 
     @Test
-    fun `neutral input never fires before ring is genuinely full`() {
+    fun `neutral input never fires`() {
         val hooks = RecordingHooks()
-        val spotter = WakeSpotter(0.99, hooks.mel, hooks.embed, hooks.classify)
+        val spotter = WakeSpotter(0.99, hooks.frontend, hooks.body)
         val fake = FakeOpusDecoder()
         val pipeline = WakeCodecPipeline(
             spotter = spotter, codec = NeoWakeAudioCodec.OPUS, samplesPerFrame = 160,
