@@ -17,7 +17,7 @@ import org.junit.runner.RunWith
  * Instrumented (`connectedAndroidTest`), not a plain JVM unit test —
  * `OrtEnvironment`/`OrtSession` load ORT's native `.so`, which is only
  * present on a real Android device/emulator classloader. The bundle's
- * reference audio ships as androidTest assets (`wakeword/*.wav`,
+ * reference audio ships as androidTest assets (the `wakeword/` wavs,
  * `reference_vectors.json`) and is read through the TEST apk's context.
  */
 @RunWith(AndroidJUnit4::class)

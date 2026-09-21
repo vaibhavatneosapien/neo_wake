@@ -55,6 +55,9 @@ public enum NeoWakeAttach {
 
     private static let lock = NSLock()
     private static var attached = false
+    /// The record the live session was built from — `arm()` compares against
+    /// it so a changed model/threshold/lag rebuilds in-process (KTD12).
+    private static var liveRecord: NeoWakeArmRecord?
     /// Fix 4: held across the ENTIRE span from the check to `attached = true`
     /// — `ensureInitialized()` + pipeline/session build below runs with the
     /// lock released (it can take real time: ORT session load, decoder
@@ -158,6 +161,34 @@ public enum NeoWakeAttach {
             NeoLog.w("NeoWakeAttach", "arm: no signed-in uid resolvable — record stamped ownerless, staying detached", metadata: [:])
             detach()
             return
+        }
+        attachOrRebuild(record: record)
+    }
+
+    /// True when `incoming` would build a different detector/capture than
+    /// the live session — model, threshold or lag differ. Owner and schema
+    /// are gate fields, not session parameters.
+    static func recordChanged(live: NeoWakeArmRecord?, incoming: NeoWakeArmRecord) -> Bool {
+        guard let live else { return false }
+        return live.modelVersion != incoming.modelVersion
+            || live.threshold != incoming.threshold
+            || live.lagMs != incoming.lagMs
+    }
+
+    /// KTD12: `attach` is an idempotent no-op while attached, so on its own a
+    /// live `arm()` with new constants would leave the headless-bootstrapped
+    /// session running the OLD persisted record until the next process
+    /// start. Tear down first when the record actually changed.
+    static func attachOrRebuild(record: NeoWakeArmRecord) {
+        lock.lock()
+        let live = liveRecord
+        let isAttached = attached
+        lock.unlock()
+        if isAttached && recordChanged(live: live, incoming: record) {
+            NSLog("[NeoWakeAttach] %@", "arm: record changed — rebuilding session (was model=\(live?.modelVersion ?? "-") "
+                + "threshold=\(live?.threshold ?? 0) lagMs=\(live?.lagMs ?? 0); now model=\(record.modelVersion) "
+                + "threshold=\(record.threshold) lagMs=\(record.lagMs))")
+            detach()
         }
         attach(record: record)
     }
@@ -306,6 +337,7 @@ public enum NeoWakeAttach {
         spotter = newSpotter
         commandCapture = newCapture
         frameWorker = worker
+        liveRecord = record
         // ceilingTimer is read + cancelled under `lock` in detach(), so publish
         // it here under the SAME lock (cancel any stale prior first) — never
         // outside it, or a concurrent detach could miss it and leak the timer.
@@ -330,7 +362,8 @@ public enum NeoWakeAttach {
         // still connected. Cleared in detach().
         NeoBleManager.shared.commandModeStateProvider = { currentCommandMode() }
         NeoBleManager.shared.micStoppedWhileConnectedHandler = { forceCommandCaptureClosedOnMicStop() }
-        NSLog("[NeoWakeAttach] %@", "attach: wake listener registered codec=opus headerLenOverride=\(configuredHeaderLenOverride)")
+        NSLog("[NeoWakeAttach] %@", "attach: wake listener registered codec=opus headerLenOverride=\(configuredHeaderLenOverride) "
+            + "model=\(record.modelVersion) threshold=\(record.threshold) lagMs=\(record.lagMs)")
     }
 
     /// Runs on `frameWorker`'s own serial queue, never on the BLE callback thread.
@@ -357,12 +390,18 @@ public enum NeoWakeAttach {
     }
 
     private static func onFire(capture: WakeCommandCapture, nowMs: Int64, step: WakeSpotterStep) {
-        NSLog("[NeoWakeAttach] %@", "wake fired score=\(step.score ?? 0) step=\(step.stepIndex)")
+        NSLog("[NeoWakeAttach] %@", "wake fired score=\(step.score ?? 0) step=\(step.stepIndex) "
+            + String(format: "frontend_ms=%.2f body_ms=%.2f", step.frontendMs, step.bodyMs))
         // Drives WakeCommandCapture open/close (fires onCaptureOpened/onClipReady above).
         capture.onFire(nowMs: nowMs)
         // Plan step 2: emit `fired` to Dart over the detections EventChannel
         // — a no-op if no Dart engine is listening (headless / backgrounded).
-        NeoWakePlugin.emitFired(["score": step.score ?? 0, "step_index": step.stepIndex])
+        NeoWakePlugin.emitFired([
+            "score": step.score ?? 0,
+            "step_index": step.stepIndex,
+            "frontend_ms": step.frontendMs,
+            "body_ms": step.bodyMs,
+        ])
     }
 
     private static func detach() {
@@ -388,6 +427,7 @@ public enum NeoWakeAttach {
         pipeline = nil
         spotter = nil
         commandCapture = nil
+        liveRecord = nil
         attached = false
     }
 
@@ -402,6 +442,7 @@ public enum NeoWakeAttach {
         spotter = nil
         commandCapture = nil
         frameWorker = nil
+        liveRecord = nil
         configuredHeaderLenOverride = 0
     }
 }

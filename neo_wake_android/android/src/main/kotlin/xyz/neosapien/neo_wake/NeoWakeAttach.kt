@@ -53,6 +53,9 @@ object NeoWakeAttach {
     private const val AMBIENT_DELAY_MARGIN_MS = 250
 
     @Volatile private var attached = false
+    /** The record the live session was built from — `arm()` compares against
+     * it so a changed model/threshold/lag rebuilds in-process (KTD12). */
+    @Volatile private var liveRecord: NeoWakeArmRecord? = null
     @Volatile private var appContext: Context? = null
     private var pipeline: WakeCodecPipeline? = null
     private var spotter: WakeSpotter? = null
@@ -185,6 +188,36 @@ object NeoWakeAttach {
             detach()
             return
         }
+        attachOrRebuild(context, record)
+    }
+
+    /** True when [incoming] would build a different detector/capture than
+     * the live session — model, threshold or lag differ. Owner and schema
+     * are gate fields, not session parameters. */
+    internal fun recordChanged(live: NeoWakeArmRecord?, incoming: NeoWakeArmRecord): Boolean =
+        live != null && (
+            live.modelVersion != incoming.modelVersion ||
+                live.threshold != incoming.threshold ||
+                live.lagMs != incoming.lagMs
+            )
+
+    /**
+     * KTD12: [attach] is an idempotent no-op while attached, so on its own a
+     * live `arm()` with new constants would leave the headless-bootstrapped
+     * session running the OLD persisted record until the next process start.
+     * Tear down first when the record actually changed.
+     */
+    @Synchronized
+    internal fun attachOrRebuild(context: Context, record: NeoWakeArmRecord) {
+        if (attached && recordChanged(liveRecord, record)) {
+            Log.i(
+                TAG,
+                "arm: record changed — rebuilding session (was model=${liveRecord?.modelVersion} " +
+                    "threshold=${liveRecord?.threshold} lagMs=${liveRecord?.lagMs}; now model=${record.modelVersion} " +
+                    "threshold=${record.threshold} lagMs=${record.lagMs})",
+            )
+            detach()
+        }
         attach(context, record)
     }
 
@@ -203,6 +236,11 @@ object NeoWakeAttach {
      * which would otherwise make [attach] bail before ever reaching the
      * registration-outcome logic under test. Real callers never touch this. */
     internal var sessionsInit: (Context) -> Unit = NeoWakeSessions::ensureInitialized
+
+    /** Test-only seam, same reason as [sessionsInit]: neo_ble's
+     * `BleEventSinks` is not on the JVM test classpath, so the reflective
+     * registration always fails there. Real callers never touch this. */
+    internal var listenerRegistrar: (String, (ByteArray) -> Unit) -> Boolean = NeoBleAudioBridge::addAudioListener
 
     /** `internal`, not `private` — same test-only reason as [sessionsInit]:
      * calling [attach] directly (bypassing [arm]/[bootstrap]'s
@@ -342,7 +380,7 @@ object NeoWakeAttach {
         //
         // KTD2: this closure is neo_wake's O(1) hand-off off the BLE
         // callback thread — it does nothing but enqueue onto `worker`.
-        val registered = NeoBleAudioBridge.addAudioListener(LISTENER_KEY) { bytes -> worker.submitFrame(bytes) }
+        val registered = listenerRegistrar(LISTENER_KEY) { bytes -> worker.submitFrame(bytes) }
         if (!registered) {
             Log.e(TAG, "$WAKE_OBS_TAG wake_attach_failed reason=listener_registration_failed codec=$codec")
             worker.shutdown()
@@ -355,6 +393,7 @@ object NeoWakeAttach {
         spotter = newSpotter
         commandCapture = newCapture
         frameWorker = worker
+        liveRecord = record
         attached = true
 
         // KTD2 ceiling: 60s wall-clock backstop for a command capture with
@@ -379,7 +418,11 @@ object NeoWakeAttach {
             }, 1000L, 1000L, TimeUnit.MILLISECONDS)
         }
 
-        Log.i(TAG, "attach: wake listener registered=$registered codec=$codec headerLenOverride=$configuredHeaderLenOverride")
+        Log.i(
+            TAG,
+            "attach: wake listener registered=$registered codec=$codec headerLenOverride=$configuredHeaderLenOverride " +
+                "model=${record.modelVersion} threshold=${record.threshold} lagMs=${record.lagMs}",
+        )
     }
 
     /** Runs on [frameWorker]'s own thread, never on the BLE callback thread. */
@@ -405,13 +448,24 @@ object NeoWakeAttach {
     }
 
     private fun onFire(capture: WakeCommandCapture, nowMs: Long, step: WakeSpotterStep) {
-        Log.i(TAG, "wake fired score=${step.score} step=${step.stepIndex}")
+        Log.i(
+            TAG,
+            "wake fired score=${step.score} step=${step.stepIndex} " +
+                "frontend_ms=${"%.2f".format(step.frontendMs)} body_ms=${"%.2f".format(step.bodyMs)}",
+        )
         // Drives WakeCommandCapture open/close (fires onCaptureOpened/onClipReady above).
         capture.onFire(nowMs)
         // Plan step 2: emit `fired` to Dart over the detections EventChannel
         // so U6's facade sees it in foreground — silently a no-op if no Dart
         // engine is listening (headless / backgrounded-without-UI).
-        NeoWakePlugin.emitFired(mapOf("score" to (step.score ?: 0.0), "step_index" to step.stepIndex))
+        NeoWakePlugin.emitFired(
+            mapOf(
+                "score" to (step.score ?: 0.0),
+                "step_index" to step.stepIndex,
+                "frontend_ms" to step.frontendMs,
+                "body_ms" to step.bodyMs,
+            ),
+        )
     }
 
     @Synchronized
@@ -427,6 +481,7 @@ object NeoWakeAttach {
         pipeline = null
         spotter = null
         commandCapture = null
+        liveRecord = null
         attached = false
     }
 
@@ -442,6 +497,8 @@ object NeoWakeAttach {
         ceilingTimer?.shutdownNow()
         ceilingTimer = null
         configuredHeaderLenOverride = 0
+        liveRecord = null
         sessionsInit = NeoWakeSessions::ensureInitialized
+        listenerRegistrar = NeoBleAudioBridge::addAudioListener
     }
 }

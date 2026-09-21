@@ -46,6 +46,20 @@ public struct WakeSpotterStep {
 
     /// True on the hop that fires (see the file header for the gate).
     public let fired: Bool
+
+    /// Wall-clock cost of the frontend hook on this hop, for the cost gate.
+    public let frontendMs: Double
+
+    /// Wall-clock cost of the body hook on this hop, for the cost gate.
+    public let bodyMs: Double
+
+    public init(stepIndex: Int, score: Double?, fired: Bool, frontendMs: Double = 0, bodyMs: Double = 0) {
+        self.stepIndex = stepIndex
+        self.score = score
+        self.fired = fired
+        self.frontendMs = frontendMs
+        self.bodyMs = bodyMs
+    }
 }
 
 /// Thrown when `process` is fed a frame of the wrong length, or a hook hands
@@ -141,7 +155,11 @@ public final class WakeSpotter {
 
         // 2. Frontend then body on a copy (the hooks may hand the buffer to
         // ORT, which must never alias the live ring).
-        let probs = try body(try frontend(ring))
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        let logmel = try frontend(ring)
+        let t1 = DispatchTime.now().uptimeNanoseconds
+        let probs = try body(logmel)
+        let t2 = DispatchTime.now().uptimeNanoseconds
         guard probs.count == Self.classCount else {
             throw WakeSpotterError(description: "body hook returned \(probs.count) classes, expected \(Self.classCount)")
         }
@@ -158,7 +176,10 @@ public final class WakeSpotter {
             resetRing()
         }
 
-        let result = WakeSpotterStep(stepIndex: step, score: score, fired: fired)
+        let result = WakeSpotterStep(
+            stepIndex: step, score: score, fired: fired,
+            frontendMs: Double(t1 - t0) / 1e6, bodyMs: Double(t2 - t1) / 1e6
+        )
         step += 1
         return result
     }

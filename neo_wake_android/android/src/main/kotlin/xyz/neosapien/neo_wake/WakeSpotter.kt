@@ -53,6 +53,10 @@ data class WakeSpotterStep(
     val score: Double?,
     /** True on the hop that fires (see the file header for the gate). */
     val fired: Boolean,
+    /** Wall-clock cost of the frontend hook on this hop, for the cost gate. */
+    val frontendMs: Double = 0.0,
+    /** Wall-clock cost of the body hook on this hop, for the cost gate. */
+    val bodyMs: Double = 0.0,
 )
 
 /** The streaming detector. Construct one per arm; a pendant reconnect means
@@ -131,7 +135,11 @@ class WakeSpotter(
 
         // 2. Frontend then body on a copy (the hooks may hand the buffer to
         // ORT, which must never alias the live ring).
-        val probs = body(frontend(ring.copyOf()))
+        val t0 = System.nanoTime()
+        val logmel = frontend(ring.copyOf())
+        val t1 = System.nanoTime()
+        val probs = body(logmel)
+        val t2 = System.nanoTime()
         check(probs.size == CLASS_COUNT) { "body hook returned ${probs.size} classes, expected $CLASS_COUNT" }
         val score = probs[1].toDouble() + probs[2].toDouble()
 
@@ -146,7 +154,7 @@ class WakeSpotter(
             resetRing()
         }
 
-        val result = WakeSpotterStep(step, score, fired)
+        val result = WakeSpotterStep(step, score, fired, (t1 - t0) / 1e6, (t2 - t1) / 1e6)
         step++
         return result
     }
