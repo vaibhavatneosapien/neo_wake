@@ -211,7 +211,24 @@ public final class WakeCommandCapture {
     private let ring: WakePrerollRing
     private let journal: WakeCommandClipJournalStore?
 
-    public private(set) var state: WakeCaptureState = .idle
+    /// Thread-safe. Mutated on the capture's own serial worker thread
+    /// (`feed`/`onFire`/`tick`/`onDisconnect`/`abort`/`rehydrate`, all hopped
+    /// onto `NeoWakeFrameWorker`'s serial queue) but READ cross-thread from
+    /// `bleQueue` via `NeoWakeAttach.currentCommandMode()` (neo_ble's
+    /// connect-ready reconcile) — an unsynchronised enum read/write across two
+    /// queues is a data race. Guard both sides with `stateLock` (same NSLock
+    /// idiom as this file's siblings). The internal reads run on the worker
+    /// queue and don't strictly need the lock among themselves, but reading
+    /// through the locked getter keeps every access uniform.
+    private let stateLock = NSLock()
+    private var _state: WakeCaptureState = .idle
+    public var state: WakeCaptureState {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return _state
+    }
+    private func setState(_ newValue: WakeCaptureState) {
+        stateLock.lock(); _state = newValue; stateLock.unlock()
+    }
     private var clip: [[UInt8]] = []
     private var clipPrerollFrames = 0
     private var clipOpenedAtMs: Int64 = 0
@@ -324,7 +341,7 @@ public final class WakeCommandCapture {
             clipPrerollFrames = min(record.header.prerollFrameCount, record.frames.count)
             clipOpenedAtMs = record.header.openedAtMs
             currentCaptureId = record.header.captureId
-            state = .capturing
+            setState(.capturing)
             NSLog("[WakeCommandCapture] clip_journal_rehydrated_resumed capture_id=%@ frames=%d",
                   record.header.captureId, record.frames.count)
             onCaptureResumed?(record.header.captureId)
@@ -402,7 +419,7 @@ public final class WakeCommandCapture {
         clip = pre
         clipPrerollFrames = min(prerollFramesAtArrival, pre.count)
         clipOpenedAtMs = nowMs
-        state = .capturing
+        setState(.capturing)
         let captureId = "cap-\(nowMs)-\(captureCounter)"
         captureCounter += 1
         currentCaptureId = captureId
@@ -509,7 +526,7 @@ public final class WakeCommandCapture {
         currentCaptureId = nil
         currentCommandId = nil
         ring.clear()
-        state = .idle
+        setState(.idle)
         journal?.clear()
     }
 }

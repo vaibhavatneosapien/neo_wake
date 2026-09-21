@@ -157,6 +157,13 @@ class WakeCommandCapture(
 
     private val ring = WakePrerollRing(config.framesFor(config.prerollWindowMs + config.lagMs))
 
+    // @Volatile: mutated on the capture's own serial worker thread
+    // (feed/onFire/tick/onDisconnect/abort/rehydrate, all hopped onto
+    // NeoWakeFrameWorker) but READ cross-thread from the BLE service thread via
+    // NeoWakeAttach.currentCommandMode() (registered as commandModeStateProvider
+    // and invoked from NeoBleService). Volatile gives the cross-thread read a
+    // consistent, visible value; the writes stay single-threaded on the worker.
+    @Volatile
     var state: WakeCaptureState = WakeCaptureState.IDLE
         private set
     private var clip: MutableList<ByteArray> = mutableListOf()

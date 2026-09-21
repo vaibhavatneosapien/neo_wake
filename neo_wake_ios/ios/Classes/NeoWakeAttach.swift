@@ -271,15 +271,22 @@ public enum NeoWakeAttach {
         // mic is never blocked), and on an explicit `"no"` stop command mode
         // immediately by aborting on the worker's serial queue (the id-guard
         // in `abort` makes a late verdict on a re-opened capture a no-op).
-        newCapture.onWakeCheckSlice = { slice in
+        // Weak capture list breaks the self-retain cycle: `onWakeCheckSlice`
+        // is a strong stored var on `newCapture`, and this closure references
+        // `newCapture`/`worker` — a strong capture would keep the capture (its
+        // ring buffer + open journal file) alive past detach(), which only nils
+        // the static `commandCapture` and never clears this closure, so deinit
+        // never runs and each attach/detach leaks. The guard preserves behavior:
+        // the abort still fires on a live "not Neo" verdict while both survive.
+        newCapture.onWakeCheckSlice = { [weak newCapture, weak worker] slice in
             NeoAudioUploader.shared.checkWake(
                 commandId: slice.commandId,
                 wakeEndMs: slice.wakeEndMs,
                 isOpus: true,
                 slice: Data(slice.audioBytes)
             ) { isNo in
-                guard isNo else { return }
-                worker.submitTask { newCapture.abort(commandId: slice.commandId) }
+                guard isNo, let capture = newCapture, let worker = worker else { return }
+                worker.submitTask { capture.abort(commandId: slice.commandId) }
             }
         }
 
