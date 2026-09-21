@@ -48,12 +48,12 @@ class WakeSpotterDeviceGoldenTest {
             maxBody = maxOf(maxBody, step.bodyMs)
             if (step.fired) fires.add(hop)
             if (fires.isNotEmpty()) {
-                Log.i(TAG, "post-fire hop=$hop score=${"%.3f".format(step.score)} armed=${spotter.isArmed}")
+                Log.i(TAG, "post-fire hop=$hop score=${String.format(java.util.Locale.US, "%.3f", step.score)} armed=${spotter.isArmed}")
             }
             hop++
             start += WakeSpotter.ADVANCE_SAMPLES
         }
-        Log.i(TAG, "fires=$fires max_frontend_ms=${"%.2f".format(maxFrontend)} max_body_ms=${"%.2f".format(maxBody)}")
+        Log.i(TAG, "fires=$fires max_frontend_ms=${String.format(java.util.Locale.US, "%.2f", maxFrontend)} max_body_ms=${String.format(java.util.Locale.US, "%.2f", maxBody)}")
         return Run(fires, scores, maxFrontend, maxBody)
     }
 

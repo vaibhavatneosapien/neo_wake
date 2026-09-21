@@ -12,9 +12,12 @@ import Foundation
 /// Bounded via a counting `DispatchSemaphore` used as a non-blocking permit
 /// pool (GCD's own serial-queue internal buffer has no fixed capacity to
 /// bound against) — a `wait(timeout: .now())` that times out means the
-/// worker fell behind, and [onOverflow] fires synchronously on the CALLER's
-/// thread (cheap: just marks a discontinuity, no decode/ONNX work) instead
-/// of the frame ever queuing or blocking the BLE callback.
+/// worker fell behind: the frame is dropped, never blocked-for, and the
+/// discontinuity is LATCHED, not signalled inline. `onOverflow` runs ON THE
+/// WORKER QUEUE, in-band, immediately before the first frame accepted after
+/// the gap — so the ring reset it triggers lands exactly where the audio
+/// actually skips (after the still-queued backlog), and never races
+/// `process()` from the BLE thread. Mirror of `NeoWakeFrameWorker.kt`.
 public final class NeoWakeFrameWorker {
     private let queue: DispatchQueue
     private let semaphore: DispatchSemaphore
@@ -26,6 +29,9 @@ public final class NeoWakeFrameWorker {
     private let statsLock = NSLock()
     /// Fix 8. Guarded by [statsLock] alongside the counts it gates.
     private var isShutdown = false
+    /// Set when a frame is rejected; consumed by the next accepted submit so
+    /// `onOverflow` runs in-band on the worker. Guarded by `statsLock`.
+    private var pendingGap = false
 
     public init(
         capacity: Int = 64,
@@ -48,15 +54,19 @@ public final class NeoWakeFrameWorker {
             // Mirrors Android's `RejectedExecutionException` path (Fix 8):
             // a submit that arrives after shutdown is treated as an
             // overflow, not silently queued.
-            statsLock.lock(); overflowCount += 1; statsLock.unlock()
-            onOverflow()
+            statsLock.lock(); overflowCount += 1; pendingGap = true; statsLock.unlock()
             return
         }
         guard semaphore.wait(timeout: .now()) == .success else {
-            statsLock.lock(); overflowCount += 1; statsLock.unlock()
-            onOverflow()
+            statsLock.lock(); overflowCount += 1; pendingGap = true; statsLock.unlock()
             return
         }
+        // Read-and-clear BEFORE enqueueing so the marker rides with the
+        // first frame after the gap, not with a later one.
+        statsLock.lock()
+        let gap = pendingGap
+        pendingGap = false
+        statsLock.unlock()
         let copy = Data(payload)
         queue.async { [weak self] in
             guard let self else { return }
@@ -75,6 +85,7 @@ public final class NeoWakeFrameWorker {
                 self.semaphore.signal()
                 return
             }
+            if gap { self.onOverflow() }
             self.process(copy)
             self.statsLock.lock(); self.processedCount += 1; self.statsLock.unlock()
             self.semaphore.signal()

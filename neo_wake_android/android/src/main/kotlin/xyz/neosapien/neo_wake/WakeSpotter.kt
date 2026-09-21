@@ -28,7 +28,9 @@ package xyz.neosapien.neo_wake
  * discontinuity is never spliced into the 2 s window; [reset] is the full
  * disconnect/disarm reset.
  *
- * Not reentrant: [process] assumes its caller pumps steps serially.
+ * Not reentrant: [process], [onFrameDropped] and [reset] all run on the
+ * frame worker's single thread — [NeoWakeFrameWorker] delivers the overflow
+ * marker in-band on that thread, never from the BLE callback.
  *
  * The two ONNX calls are injected hooks, so this file has zero ORT/plugin
  * dependency and is exercised by a plain JVM JUnit test with fakes standing

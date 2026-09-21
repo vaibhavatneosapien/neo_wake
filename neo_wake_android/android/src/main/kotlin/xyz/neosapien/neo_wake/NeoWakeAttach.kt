@@ -2,6 +2,7 @@ package xyz.neosapien.neo_wake
 
 import android.content.Context
 import android.util.Log
+import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
@@ -219,6 +220,12 @@ object NeoWakeAttach {
             detach()
         }
         attach(context, record)
+        if (!attached) {
+            // The old session is gone and the new one did not come up. The
+            // record stays persisted (armed), so the next bootstrap/arm retries;
+            // make the gap visible instead of silent.
+            Log.e(TAG, "$WAKE_OBS_TAG wake_rebuild_failed reason=reattach_failed model=${record.modelVersion}")
+        }
     }
 
     /** Live disarm (U6 Dart facade -> [NeoWakePlugin.disarm]). Clears the
@@ -451,7 +458,8 @@ object NeoWakeAttach {
         Log.i(
             TAG,
             "wake fired score=${step.score} step=${step.stepIndex} " +
-                "frontend_ms=${"%.2f".format(step.frontendMs)} body_ms=${"%.2f".format(step.bodyMs)}",
+                "frontend_ms=${String.format(Locale.US, "%.2f", step.frontendMs)} " +
+                "body_ms=${String.format(Locale.US, "%.2f", step.bodyMs)}",
         )
         // Drives WakeCommandCapture open/close (fires onCaptureOpened/onClipReady above).
         capture.onFire(nowMs)

@@ -5,6 +5,7 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * neo_wake's OWN single-thread, bounded worker for the "wake" BLE audio
@@ -18,9 +19,13 @@ import java.util.concurrent.TimeUnit
  * Bounded, not unbounded: an unbounded queue behind a stalled consumer would
  * let the BLE thread's fire-and-forget submissions pile up memory forever
  * with no signal anything is wrong. A full queue means the worker fell
- * behind — [onOverflow] fires synchronously (still on the CALLER's thread,
- * which is fine: it is not decode/ONNX work, just marking a discontinuity)
- * and the frame is dropped, never blocked-for.
+ * behind: the frame is dropped, never blocked-for, and the discontinuity is
+ * LATCHED, not signalled inline. [onOverflow] runs ON THE WORKER THREAD,
+ * in-band, immediately before the first frame accepted after the gap — so
+ * the ring reset it triggers lands exactly where the audio actually skips
+ * (after the still-queued backlog), and never races `process()` from the
+ * BLE thread. A synchronous callback here would have zeroed the live ring
+ * up to 64 frames (1.28 s) too early, mid-`process()`.
  */
 internal class NeoWakeFrameWorker(
     capacity: Int = 64,
@@ -39,18 +44,26 @@ internal class NeoWakeFrameWorker(
     var processedCount: Int = 0
         private set
 
+    /** Set on the BLE thread when a frame is rejected; consumed by the next
+     * accepted submit so [onOverflow] runs in-band on the worker. */
+    private val pendingGap = AtomicBoolean(false)
+
     /** O(1) hand-off — copies [payload] (the caller's array may be reused by
      * neo_ble after this returns) and enqueues. Never blocks. */
     fun submitFrame(payload: ByteArray) {
         val copy = payload.copyOf()
+        // Read-and-clear BEFORE enqueueing so the marker rides with the
+        // first frame after the gap, not with a later one.
+        val gap = pendingGap.getAndSet(false)
         try {
             executor.execute {
+                if (gap) onOverflow()
                 process(copy)
                 processedCount++
             }
         } catch (e: RejectedExecutionException) {
             overflowCount++
-            onOverflow()
+            pendingGap.set(true)
         }
     }
 

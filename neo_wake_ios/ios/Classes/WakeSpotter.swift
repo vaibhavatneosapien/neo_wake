@@ -20,7 +20,9 @@ import Foundation
 // the ring but leaves `armed` alone; `reset()` is the full disconnect/disarm
 // reset.
 //
-// Not reentrant: `process` assumes its caller pumps steps serially.
+// Not reentrant: `process`, `onFrameDropped` and `reset` all run on the
+// frame worker's serial queue — `NeoWakeFrameWorker` delivers the overflow
+// marker in-band on that queue, never from the BLE callback.
 //
 // The two ONNX calls are injected hooks, so this file has zero ORT/plugin
 // dependency and is exercised by plain XCTest with fakes standing in for the
@@ -147,10 +149,16 @@ public final class WakeSpotter {
 
         // 1. Shift the ring left by one advance and append the new samples,
         // scaled into [-1, 1].
+        // In place, like the Kotlin twin's System.arraycopy: a self-slice
+        // `replaceSubrange` would make the buffer non-uniquely referenced and
+        // copy-on-write all 32000 floats every hop.
         let tail = Self.windowSamples - Self.advanceSamples
-        ring.replaceSubrange(0..<tail, with: ring[Self.advanceSamples..<Self.windowSamples])
-        for i in 0..<Self.advanceSamples {
-            ring[tail + i] = Float(frame[i]) * Self.int16Scale
+        ring.withUnsafeMutableBufferPointer { buf in
+            let base = buf.baseAddress!
+            memmove(base, base + Self.advanceSamples, tail * MemoryLayout<Float>.stride)
+            for i in 0..<Self.advanceSamples {
+                base[tail + i] = Float(frame[i]) * Self.int16Scale
+            }
         }
 
         // 2. Frontend then body on a copy (the hooks may hand the buffer to

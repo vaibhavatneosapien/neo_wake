@@ -169,10 +169,7 @@ public enum NeoWakeAttach {
     /// the live session — model, threshold or lag differ. Owner and schema
     /// are gate fields, not session parameters.
     static func recordChanged(live: NeoWakeArmRecord?, incoming: NeoWakeArmRecord) -> Bool {
-        guard let live else { return false }
-        return live.modelVersion != incoming.modelVersion
-            || live.threshold != incoming.threshold
-            || live.lagMs != incoming.lagMs
+        armRecordSessionChanged(live: live, incoming: incoming)
     }
 
     /// KTD12: `attach` is an idempotent no-op while attached, so on its own a
@@ -191,6 +188,12 @@ public enum NeoWakeAttach {
             detach()
         }
         attach(record: record)
+        if !isAttached {
+            // The old session is gone and the new one did not come up. The
+            // record stays persisted (armed), so the next bootstrap/arm
+            // retries; make the gap visible instead of silent.
+            NeoLog.w("NeoWakeAttach", "wake_rebuild_failed reason=reattach_failed model=\(record.modelVersion)", metadata: [:])
+        }
     }
 
     /// Live disarm (U6 Dart facade -> `NeoWakePlugin.disarm`). Clears the

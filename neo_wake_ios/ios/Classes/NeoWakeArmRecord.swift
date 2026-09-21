@@ -116,3 +116,14 @@ public enum NeoWakeArmStore {
         UserDefaults.standard.removeObject(forKey: key)
     }
 }
+
+/// True when `incoming` would build a different detector/capture than the
+/// live session — model, threshold or lag differ. Owner and schema are gate
+/// fields, not session parameters. Pure, so it is host-testable; the Kotlin
+/// twin is `NeoWakeAttach.recordChanged`.
+public func armRecordSessionChanged(live: NeoWakeArmRecord?, incoming: NeoWakeArmRecord) -> Bool {
+    guard let live else { return false }
+    return live.modelVersion != incoming.modelVersion
+        || live.threshold != incoming.threshold
+        || live.lagMs != incoming.lagMs
+}
